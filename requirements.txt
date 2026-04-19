@@ -1,0 +1,24 @@
+# ============================================================
+# Company Scorer — Python Dependencies
+# ============================================================
+
+# --- UI Framework ---
+streamlit>=1.30.0            # Web app framework
+
+# --- LLM (Gemini) ---
+google-genai>=1.0.0          # Google Gemini SDK (Flash for extraction, Pro for scoring)
+
+# --- Observability ---
+langfuse>=2.0.0,<3.0.0       # LLM tracing & evaluation dashboard (pin to v2 — v3 needs pyroaring which requires Python 3.10+)
+
+# --- Search ---
+tavily-python>=0.3.0         # Tavily search API for outbound research
+
+# --- Database ---
+supabase>=2.0.0              # Supabase Python client (wraps Postgres + REST API)
+
+# --- Data ---
+pandas>=2.0.0                # Dataframes for table browser + exports
+
+# --- Utilities ---
+python-dotenv>=1.0.0         # Load .env into os.environ

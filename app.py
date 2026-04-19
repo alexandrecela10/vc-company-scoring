@@ -1,0 +1,929 @@
+"""
+Company Scorer — Streamlit UI
+
+Layout:
+  Sidebar      — company list with score badges, weight editor toggle
+  Main panel   — tabs: Scorecard | Pipeline | Table Browser
+
+Scorecard tab:
+  - Overall score gauge + completeness status
+  - Per metric type: score bar + child metrics with evidence
+  - Missing must-haves panel + gap action status
+
+Pipeline tab:
+  - Stage history for selected company
+
+Table Browser tab:
+  - Raw view of any of the 8 DB tables (for demo transparency)
+"""
+
+import streamlit as st
+import pandas as pd
+import math
+from datetime import datetime
+from typing import Optional
+
+import db
+import scorer
+import market_agent
+from scorer import CompanyScorecard, MetricTypeScore, MetricScore
+
+# ---------------------------------------------------------------------------
+# Page config
+# ---------------------------------------------------------------------------
+st.set_page_config(
+    page_title="Company Scorer — Jasoor Ventures",
+    page_icon="🏆",
+    layout="wide",
+    initial_sidebar_state="expanded",
+)
+
+# ---------------------------------------------------------------------------
+# Session state defaults
+# ---------------------------------------------------------------------------
+if "selected_company_id" not in st.session_state:
+    st.session_state.selected_company_id = None
+if "user_id" not in st.session_state:
+    st.session_state.user_id = "house"
+if "show_weight_editor" not in st.session_state:
+    st.session_state.show_weight_editor = False
+# Incremented after every write (agent action, override, stage change).
+# Used as a cache key so st.cache_data invalidates exactly when data changes.
+if "data_version" not in st.session_state:
+    st.session_state.data_version = 0
+
+
+def bump_data_version():
+    """Call this after any write to invalidate all cached reads."""
+    st.session_state.data_version += 1
+
+
+# ---------------------------------------------------------------------------
+# Cached data loaders
+#
+# Streamlit reruns the whole script on every click, so the sidebar would
+# otherwise re-score every company on every interaction (~4s per click).
+# These wrappers cache by (company_id, user_id, version). `version` is bumped
+# by agent actions, overrides, and stage transitions so stale data never
+# lingers after a real write.
+# ---------------------------------------------------------------------------
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_score_all(user_id: str, version: int):
+    return scorer.score_all_companies(user_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_score_company(company_id: str, user_id: str, version: int):
+    return scorer.score_company(company_id, user_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_get_company(company_id: str, version: int):
+    return db.get_company(company_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_get_founders(company_id: str, version: int):
+    return db.get_founders(company_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_get_news(company_id: str, version: int):
+    return db.get_cached_news(company_id, limit=5)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def cached_get_metric_types(version: int):
+    # Metric types change rarely — longer TTL is fine.
+    return db.get_metric_types()
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_stale_company_ids(version: int) -> set:
+    """
+    Return the set of company_ids that have at least one stale Market Growth
+    value. Used in the sidebar to show a ⏳ badge. Cheap single query,
+    cached per data_version.
+    """
+    rows = market_agent.find_stale_market_values()
+    return {r["company_id"] for r in rows}
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+def score_color(score: Optional[float]) -> str:
+    """Return a colour string based on score value for visual badges."""
+    if score is None:
+        return "#888888"
+    if score >= 4.0:
+        return "#22c55e"   # green
+    if score >= 3.0:
+        return "#f59e0b"   # amber
+    return "#ef4444"       # red
+
+
+def score_badge(score: Optional[float], size: str = "1rem") -> str:
+    """HTML badge showing the score with colour coding."""
+    color = score_color(score)
+    label = f"{score:.2f}" if score is not None else "N/A"
+    return (
+        f'<span style="background:{color};color:white;padding:2px 8px;'
+        f'border-radius:12px;font-weight:700;font-size:{size}">{label}</span>'
+    )
+
+
+def progress_bar_html(score: Optional[float], max_score: float = 5.0) -> str:
+    """Thin horizontal progress bar for a score."""
+    if score is None:
+        pct = 0
+        color = "#888888"
+    else:
+        pct = min(100, (score / max_score) * 100)
+        color = score_color(score)
+    return (
+        f'<div style="background:#e5e7eb;border-radius:4px;height:8px;width:100%">'
+        f'<div style="background:{color};width:{pct:.1f}%;height:8px;border-radius:4px"></div>'
+        f"</div>"
+    )
+
+
+def pipeline_stage_label(stage: str) -> str:
+    """Human-readable pipeline stage label."""
+    labels = {
+        "deal_sourcing": "🔍 Deal Sourcing",
+        "first_contact": "📞 First Contact",
+        "due_diligence": "🔬 Due Diligence",
+        "ic_review": "⚖️ IC Review",
+        "passed": "❌ Passed",
+        "invested": "✅ Invested",
+    }
+    return labels.get(stage, stage)
+
+
+# ---------------------------------------------------------------------------
+# Sidebar — company list
+# ---------------------------------------------------------------------------
+
+def render_sidebar():
+    """Render the company list sidebar with score badges."""
+    with st.sidebar:
+        st.markdown("## 🏆 Company Scorer")
+        st.markdown("*Jasoor Ventures — Deal Sourcing*")
+        st.divider()
+
+        # Weight view toggle
+        view = st.radio(
+            "Weight view",
+            ["House view", "Personal view"],
+            horizontal=True,
+            help="House view uses institutional weights. Personal view uses your custom weights.",
+        )
+        st.session_state.user_id = "house" if view == "House view" else st.session_state.get("analyst_email", "house")
+
+        if st.button("⚖️ Edit weights", use_container_width=True):
+            st.session_state.show_weight_editor = not st.session_state.show_weight_editor
+
+        st.divider()
+        st.markdown("### Companies")
+
+        # Load and score all companies (cached — only recomputes after writes)
+        try:
+            all_scorecards = cached_score_all(
+                st.session_state.user_id,
+                st.session_state.data_version,
+            )
+        except Exception as e:
+            st.error(f"Could not load companies: {e}")
+            return
+
+        if not all_scorecards:
+            st.info("No companies found. Run seed.sql in Supabase.")
+            return
+
+        # Cached — one query per data_version, not per company
+        stale_ids = cached_stale_company_ids(st.session_state.data_version)
+
+        for sc in all_scorecards:
+            badge_html = score_badge(sc.overall_score, size="0.8rem")
+            stage_icon = pipeline_stage_label(sc.pipeline_stage).split(" ")[0]
+            is_selected = st.session_state.selected_company_id == sc.company_id
+
+            # Highlight selected company
+            bg = "#1e3a5f" if is_selected else "transparent"
+            border = "2px solid #3b82f6" if is_selected else "1px solid #374151"
+
+            clicked = st.button(
+                f"{stage_icon} {sc.company_name}",
+                key=f"company_{sc.company_id}",
+                use_container_width=True,
+                help=f"Score: {sc.overall_score or 'Incomplete'}",
+            )
+            if clicked:
+                st.session_state.selected_company_id = sc.company_id
+                st.rerun()
+
+            # Show score badge + issue indicators below button
+            col_score, col_issues = st.columns([2, 1])
+            with col_score:
+                st.markdown(badge_html, unsafe_allow_html=True)
+            with col_issues:
+                indicators = []
+                if not sc.is_complete:
+                    indicators.append(
+                        '<span style="color:#f59e0b;font-size:0.7rem">⚠️ Incomplete</span>'
+                    )
+                if sc.company_id in stale_ids:
+                    indicators.append(
+                        '<span style="color:#60a5fa;font-size:0.7rem" '
+                        'title="Has stale Market Growth signal — run market agent">'
+                        '⏳ Stale</span>'
+                    )
+                if indicators:
+                    st.markdown("<br>".join(indicators), unsafe_allow_html=True)
+
+            st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
+        # Auto-select first company
+        if st.session_state.selected_company_id is None and all_scorecards:
+            st.session_state.selected_company_id = all_scorecards[0].company_id
+            st.rerun()
+
+
+# ---------------------------------------------------------------------------
+# Weight editor panel
+# ---------------------------------------------------------------------------
+
+def render_weight_editor():
+    """Inline weight editor — sliders per metric type."""
+    st.markdown("### ⚖️ Metric Type Weights")
+    st.caption(
+        "Adjust weights to reflect your personal view. "
+        "The score recomputes instantly. House = equal weights."
+    )
+
+    metric_types = db.get_metric_types()
+    if not metric_types:
+        st.info("No metric types found.")
+        return
+
+    cols = st.columns(2)
+    for i, mt in enumerate(metric_types):
+        with cols[i % 2]:
+            current_weights = db.get_weights(st.session_state.user_id)
+            current_w = current_weights.get(mt["id"], mt.get("house_weight", 1.0))
+            new_w = st.slider(
+                mt["name"],
+                min_value=0.0,
+                max_value=3.0,
+                value=float(current_w),
+                step=0.1,
+                key=f"weight_{mt['id']}",
+                help="0 = ignore this dimension entirely, 3 = triple weight",
+            )
+            if new_w != current_w:
+                db.upsert_weight(st.session_state.user_id, mt["id"], new_w)
+
+    st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Scorecard tab
+# ---------------------------------------------------------------------------
+
+def render_overall_score(sc: CompanyScorecard):
+    """Top-of-scorecard overall score + formula breakdown."""
+    col_score, col_meta, col_formula = st.columns([1, 2, 2])
+
+    with col_score:
+        # Big score display
+        color = score_color(sc.overall_score)
+        label = f"{sc.overall_score:.2f}" if sc.overall_score else "N/A"
+        st.markdown(
+            f"""
+            <div style="text-align:center;padding:16px;background:#1f2937;
+                        border-radius:12px;border:2px solid {color}">
+                <div style="font-size:2.8rem;font-weight:800;color:{color}">{label}</div>
+                <div style="color:#9ca3af;font-size:0.8rem">out of 5.00</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with col_meta:
+        st.markdown(f"**Company:** {sc.company_name}")
+        st.markdown(f"**Pipeline stage:** {pipeline_stage_label(sc.pipeline_stage)}")
+        if sc.is_complete:
+            st.markdown("**Status:** ✅ All must-haves present")
+        else:
+            st.markdown("**Status:** ⚠️ Score incomplete")
+            for mt_name in sc.missing_must_have_types:
+                st.markdown(f"&nbsp;&nbsp;&nbsp;• Missing: **{mt_name}**", unsafe_allow_html=True)
+
+    with col_formula:
+        st.markdown("**Formula breakdown (Option B)**")
+        if sc.weighted_avg_base is not None:
+            st.markdown(f"Base weighted avg: `{sc.weighted_avg_base:.2f}`")
+            st.markdown(f"Must-have multiplier: `{sc.must_have_multiplier:.4f}`")
+            if sc.overall_score:
+                st.markdown(
+                    f"**Overall = {sc.weighted_avg_base:.2f} × {sc.must_have_multiplier:.4f} = {sc.overall_score:.2f}**"
+                )
+        else:
+            st.markdown("*Not computable — missing must-have data*")
+
+
+def render_metric_type_section(mts: MetricTypeScore):
+    """Render one metric type block: score bar + child metrics table."""
+    # Header row
+    badge_html = score_badge(mts.type_score)
+    must_have_tag = (
+        '<span style="background:#7c3aed;color:white;padding:1px 6px;'
+        'border-radius:8px;font-size:0.7rem;margin-left:8px">must-have</span>'
+        if mts.must_have else ""
+    )
+
+    st.markdown(
+        f"**{mts.metric_type_name}** {must_have_tag} &nbsp; {badge_html}",
+        unsafe_allow_html=True,
+    )
+    st.markdown(progress_bar_html(mts.type_score), unsafe_allow_html=True)
+
+    if mts.missing_must_haves:
+        for name in mts.missing_must_haves:
+            st.markdown(
+                f'<span style="color:#f59e0b;font-size:0.8rem">⚠️ Must-have metric missing: {name}</span>',
+                unsafe_allow_html=True,
+            )
+
+    if not mts.metric_scores:
+        st.caption("No metrics recorded yet for this dimension.")
+        return
+
+    # Build metrics table.
+    # "Link" and "Verified" columns expose the evidence URL + the deterministic
+    # check from link_verifier. ✅ = URL reachable AND quote appears on the page.
+    # ⚠️ = URL present but not verified (may be hallucinated or paywalled).
+    # — = no URL at all (analyst-entered or agent had no source).
+    rows = []
+    for ms in mts.metric_scores:
+        if ms.evidence_url:
+            verified_badge = "✅" if ms.url_verified else "⚠️"
+        else:
+            verified_badge = "—"
+        rows.append({
+            "Metric": ms.metric_name,
+            "Value": ms.value_raw or "—",
+            "Score (1–5)": f"{ms.value_numeric:.1f}" if ms.value_numeric is not None else "—",
+            "Weight": ms.weight,
+            "Source": ms.source_name or "—",
+            "Confidence": f"{ms.confidence:.0%}",
+            "🔒": "✅" if ms.override else "",
+            "Evidence": (ms.raw_evidence[:120] + "…") if ms.raw_evidence and len(ms.raw_evidence) > 120 else (ms.raw_evidence or "—"),
+            "Link": ms.evidence_url or "",
+            "Verified": verified_badge,
+        })
+
+    df = pd.DataFrame(rows)
+    st.dataframe(
+        df,
+        use_container_width=True,
+        hide_index=True,
+        column_config={
+            "Evidence": st.column_config.TextColumn(width="large"),
+            "Score (1–5)": st.column_config.TextColumn(width="small"),
+            "Confidence": st.column_config.TextColumn(width="small"),
+            "🔒": st.column_config.TextColumn(width="small", help="Analyst override — agents cannot modify"),
+            "Link": st.column_config.LinkColumn(width="small", display_text="open ↗"),
+            "Verified": st.column_config.TextColumn(
+                width="small",
+                help="✅ URL reachable and evidence quote found on page  |  ⚠️ link present but not verified  |  — no source link",
+            ),
+        },
+    )
+
+
+def render_market_agent(company_id: str):
+    """
+    Show staleness of this company's Market Growth metrics and
+    let the analyst trigger a refresh via the market_agent.
+
+    The agent will: Tavily search → Gemini extract → insert new metric value
+    with provenance. Only non-override rows are refreshed.
+    """
+    # Only show stale rows for THIS company (not all companies)
+    all_stale = market_agent.find_stale_market_values()
+    stale_for_this = [s for s in all_stale if s["company_id"] == company_id]
+
+    st.markdown("### 📈 Market Signal Agent")
+
+    if not stale_for_this:
+        st.success(
+            "All Market Growth metrics are fresh (updated within the last "
+            f"{market_agent.STALENESS_DAYS} days)."
+        )
+        return
+
+    st.warning(
+        f"Found **{len(stale_for_this)} stale** Market Growth metric(s) "
+        f"older than {market_agent.STALENESS_DAYS} days. "
+        "The agent will use Tavily + Gemini to refresh them with a fresh value + evidence."
+    )
+
+    # Show each stale row with its age
+    for s in stale_for_this:
+        age_days = (datetime.now(s["captured_at"].tzinfo) - s["captured_at"]).days
+        st.markdown(
+            f"- **{s['metric_name']}** = `{s['current_value']}` "
+            f"(last updated {age_days} days ago)"
+        )
+
+    if st.button("🔄 Refresh stale signals now", type="primary", key=f"mkt_{company_id}"):
+        with st.spinner("Searching the web and extracting latest market data..."):
+            results = [market_agent.refresh_one(s) for s in stale_for_this]
+        bump_data_version()
+
+        # Show each result inline
+        for r in results:
+            if r["status"] == "updated":
+                verified = r.get("url_verified", False)
+                verify_badge = "✅ verified" if verified else f"⚠️ unverified ({r.get('url_verify_reason','')})"
+                st.success(
+                    f"✅ {r['message']} → new value: **{r['new_value']}**  ·  link {verify_badge}"
+                )
+                with st.expander("View evidence"):
+                    st.markdown(f"**Source:** [{r['source_url']}]({r['source_url']})")
+                    st.markdown(f'> "{r["evidence_quote"]}"')
+            elif r["status"] == "no_data":
+                st.info(f"ℹ️ {r['message']}")
+            else:
+                st.error(f"❌ {r['message']}")
+        st.rerun()
+
+
+def render_gap_actions(company_id: str):
+    """
+    Gap Agent panel.
+
+    Shows:
+      - missing must-have metrics (with the obtain_method routing hint)
+      - a "Run gap agent" button that fires gap_agent.process_company
+        (drafts founder emails for "Ask Founders" metrics, runs Tavily
+        + Gemini + link verification for web-findable metrics)
+      - the log of previously-attempted actions with their status
+    """
+    import gap_agent
+
+    st.markdown("### 🤖 Gap Agent")
+
+    missing = scorer.get_missing_must_haves(company_id)
+
+    if missing:
+        st.warning(
+            f"**{len(missing)} missing must-have metric(s).** "
+            "The agent can draft founder emails or run web searches to close these gaps."
+        )
+        for m in missing:
+            route = "📧 Founder outreach" if m["obtain_method"] == "Ask Founders" else \
+                    "🔍 Web search" if m["obtain_method"] in {"Tavily", "LinkedIn", "Web Search"} else \
+                    "✋ Manual"
+            st.markdown(
+                f"- **{m['metric_name']}** ({m['metric_type_name']}) — "
+                f"obtain method: `{m['obtain_method']}` → {route}"
+            )
+
+        if st.button("🤖 Run gap agent now", type="primary", key=f"gap_{company_id}"):
+            with st.spinner("Drafting emails and searching the web..."):
+                results = gap_agent.process_company(company_id)
+            bump_data_version()
+            for r in results:
+                icon = {"filled": "✅", "drafted": "✉️", "no_data": "ℹ️",
+                        "error": "❌", "skipped": "⚠️"}.get(r["status"], "•")
+                st.write(f"{icon} {r['message']}")
+            st.rerun()
+    else:
+        st.success("No missing must-have metrics. 🎉")
+
+    # Always show the action log (even if no gaps currently missing)
+    actions = db.get_gap_actions(company_id)
+    if not actions:
+        return
+
+    st.markdown("#### Action log")
+    for action in actions:
+        metric_name = (action.get("metric") or {}).get("name", "Unknown metric")
+        status_color = {"pending": "#f59e0b", "sent": "#3b82f6", "resolved": "#22c55e", "failed": "#ef4444"}.get(
+            action.get("status", "pending"), "#888888"
+        )
+        status_badge = (
+            f'<span style="background:{status_color};color:white;padding:2px 8px;'
+            f'border-radius:8px;font-size:0.75rem">{action.get("status","pending").upper()}</span>'
+        )
+        gap_type_label = "📧 Founder Outreach" if action.get("gap_type") == "outreach" else "🔍 Web Search"
+
+        with st.expander(f"{gap_type_label} — {metric_name}", expanded=False):
+            st.markdown(f"**Type:** {gap_type_label} &nbsp; {status_badge}", unsafe_allow_html=True)
+            st.markdown(f"**Created:** {str(action.get('created_at',''))[:10]}")
+            if action.get("output_draft"):
+                st.markdown("**Draft output:**")
+                st.markdown(
+                    f'<div style="background:#1f2937;padding:12px;border-radius:8px;'
+                    f'font-size:0.85rem;white-space:pre-wrap">{action["output_draft"]}</div>',
+                    unsafe_allow_html=True,
+                )
+
+            # Status update buttons
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if action.get("status") == "pending":
+                    if st.button("Mark as Sent", key=f"sent_{action['id']}"):
+                        db.update_gap_action_status(action["id"], "sent")
+                        bump_data_version()
+                        st.rerun()
+            with col_b:
+                if action.get("status") in ("pending", "sent"):
+                    if st.button("Mark Resolved", key=f"resolved_{action['id']}"):
+                        db.update_gap_action_status(action["id"], "resolved")
+                        bump_data_version()
+                        st.rerun()
+
+
+def render_override_editor(company_id: str, sc: CompanyScorecard):
+    """Allow analyst to override a metric value directly in the UI."""
+    st.markdown("### ✏️ Override a Metric Value")
+    st.caption("Overridden values are locked — agents cannot overwrite them.")
+
+    # Build flat list of all metrics with current values
+    all_options = {}
+    for mts in sc.type_scores:
+        for ms in mts.metric_scores:
+            label = f"{mts.metric_type_name} → {ms.metric_name}"
+            all_options[label] = ms
+
+    selected_label = st.selectbox("Select metric to override", list(all_options.keys()))
+    if not selected_label:
+        return
+
+    selected_ms = all_options[selected_label]
+
+    col_val, col_reason = st.columns(2)
+    with col_val:
+        new_value = st.text_input(
+            "New value",
+            value=selected_ms.value_raw or "",
+            help="Use 'true'/'false' for booleans, 1–5 for scores, numbers for counts",
+        )
+    with col_reason:
+        override_reason = st.text_input(
+            "Reason for override",
+            placeholder="e.g. Confirmed by founder in call 2025-04-18",
+        )
+
+    if st.button("💾 Save Override", type="primary"):
+        if new_value and override_reason:
+            db.upsert_metric_value(
+                company_id=company_id,
+                metric_id=selected_ms.metric_id,
+                value=new_value,
+                source_id=None,
+                raw_evidence=f"[ANALYST OVERRIDE] {override_reason}",
+                captured_by=st.session_state.user_id,
+                confidence=1.0,
+                override=True,
+                override_reason=override_reason,
+            )
+            bump_data_version()
+            st.success(f"Override saved for **{selected_ms.metric_name}**. Score will recompute.")
+            st.rerun()
+        else:
+            st.warning("Please provide both a new value and a reason.")
+
+
+def render_company_intel(company_id: str, sc):
+    """
+    Rich company card: website, LinkedIn, founders, recent news, and
+    quick-action buttons (stage transitions + Share).
+
+    Sits between the score header and the dimension breakdown so analysts
+    can scan "who/where/what's new" before diving into metrics.
+    """
+    import company_intel
+
+    company = cached_get_company(company_id, st.session_state.data_version)
+    if not company:
+        return
+
+    # ---------- Links row ----------
+    link_bits = []
+    if company.get("website"):
+        link_bits.append(f"🌐 [Website]({company['website']})")
+    if company.get("linkedin_url"):
+        link_bits.append(f"💼 [Company LinkedIn]({company['linkedin_url']})")
+    if link_bits:
+        st.markdown(" &nbsp; · &nbsp; ".join(link_bits))
+
+    # ---------- Founders ----------
+    founders = cached_get_founders(company_id, st.session_state.data_version)
+    if founders:
+        st.markdown("#### Founders")
+        cols = st.columns(min(len(founders), 3))
+        for i, f in enumerate(founders):
+            with cols[i % len(cols)]:
+                # Compact card per founder. LinkedIn is the primary CTA.
+                linkedin_link = (
+                    f"[💼 LinkedIn]({f['linkedin_url']})"
+                    if f.get("linkedin_url") else "_no LinkedIn_"
+                )
+                st.markdown(
+                    f"**{f['name']}**  \n"
+                    f"<span style='color:#9ca3af;font-size:0.85rem'>{f.get('title','')}</span>  \n"
+                    f"{linkedin_link}",
+                    unsafe_allow_html=True,
+                )
+
+    # ---------- News ----------
+    st.markdown("#### Recent news")
+    news = cached_get_news(company_id, st.session_state.data_version)
+    last_fetch_row = db.newest_news_fetch(company_id) or {}
+    last_fetch = last_fetch_row.get("last_fetch")
+
+    col_news, col_btn = st.columns([4, 1])
+    with col_btn:
+        if st.button("🔄 Refresh news", key=f"news_{company_id}"):
+            with st.spinner("Searching the web..."):
+                try:
+                    n = company_intel.fetch_news(company_id)
+                    st.success(f"Fetched {n} articles.")
+                except Exception as e:
+                    st.error(f"News fetch failed: {e}")
+            bump_data_version()
+            st.rerun()
+
+    with col_news:
+        if not news:
+            st.caption("No news cached yet. Click 'Refresh news' to fetch.")
+        else:
+            if last_fetch:
+                st.caption(f"Last refreshed: {str(last_fetch)[:16]} UTC")
+            for a in news:
+                st.markdown(f"- [{a['title']}]({a['url']})")
+                if a.get("snippet"):
+                    st.caption(a["snippet"][:180] + ("…" if len(a["snippet"]) > 180 else ""))
+
+    # ---------- Action buttons ----------
+    st.markdown("#### Actions")
+    current_stage = company.get("pipeline_stage", "deal_sourcing")
+    col_a, col_b, col_c = st.columns(3)
+
+    # Move to First Contact (only if not already there or later)
+    with col_a:
+        already_past = current_stage not in ("deal_sourcing",)
+        if st.button(
+            "➡️ Move to First Contact",
+            key=f"fc_{company_id}",
+            disabled=already_past,
+            help="Already past First Contact stage" if already_past else None,
+        ):
+            company_intel.transition_stage(
+                company_id, "first_contact",
+                user_id=st.session_state.user_id,
+                score_snapshot=sc.overall_score,
+            )
+            bump_data_version()
+            st.success("Moved to First Contact.")
+            st.rerun()
+
+    # Pass
+    with col_b:
+        is_passed = current_stage == "passed"
+        if st.button(
+            "🚫 Pass",
+            key=f"pass_{company_id}",
+            disabled=is_passed,
+            help="Already passed" if is_passed else None,
+        ):
+            company_intel.transition_stage(
+                company_id, "passed",
+                user_id=st.session_state.user_id,
+                score_snapshot=sc.overall_score,
+            )
+            bump_data_version()
+            st.warning("Marked as passed.")
+            st.rerun()
+
+    # Share — generates a copyable markdown brief
+    with col_c:
+        # Use session state to toggle visibility so button is non-destructive
+        share_key = f"show_share_{company_id}"
+        if st.button("📤 Share with team", key=f"share_{company_id}"):
+            st.session_state[share_key] = not st.session_state.get(share_key, False)
+
+    if st.session_state.get(share_key):
+        summary = company_intel.build_share_summary(company, sc, founders, news)
+        st.info("Copy the markdown below and paste into Slack/email:")
+        # st.code has a built-in copy button in the top-right corner
+        st.code(summary, language="markdown")
+
+
+def render_scorecard_tab(company_id: str):
+    """Full scorecard tab for one company."""
+    try:
+        sc = cached_score_company(
+            company_id,
+            st.session_state.user_id,
+            st.session_state.data_version,
+        )
+    except Exception as e:
+        st.error(f"Could not compute scorecard: {e}")
+        return
+
+    # Overall score header
+    render_overall_score(sc)
+
+    # Company intel — website, LinkedIns, founders, news, action buttons
+    render_company_intel(company_id, sc)
+
+    st.divider()
+
+    # Per metric type sections
+    st.markdown("### Dimension Breakdown")
+
+    # Must-haves first, then nice-to-haves
+    must_haves = [mts for mts in sc.type_scores if mts.must_have]
+    nice_to_haves = [mts for mts in sc.type_scores if not mts.must_have]
+
+    for mts in must_haves:
+        with st.container():
+            render_metric_type_section(mts)
+            st.markdown("<div style='margin-bottom:16px'></div>", unsafe_allow_html=True)
+
+    if nice_to_haves:
+        with st.expander("📊 Nice-to-have dimensions", expanded=False):
+            for mts in nice_to_haves:
+                render_metric_type_section(mts)
+                st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
+
+    st.divider()
+
+    # Market agent panel
+    render_market_agent(company_id)
+
+    # Gap actions panel
+    render_gap_actions(company_id)
+
+    # Override editor
+    with st.expander("✏️ Override a metric value (analyst lock)", expanded=False):
+        render_override_editor(company_id, sc)
+
+
+# ---------------------------------------------------------------------------
+# Pipeline tab
+# ---------------------------------------------------------------------------
+
+def render_pipeline_tab(company_id: str):
+    """Pipeline stage history for one company."""
+    history = db.get_pipeline_history(company_id)
+    company = db.get_company(company_id)
+
+    st.markdown(f"### Pipeline — {company['name'] if company else ''}")
+    st.markdown(
+        f"**Current stage:** {pipeline_stage_label(company.get('pipeline_stage', '') if company else '')}"
+    )
+
+    # Stage transition buttons
+    stages = ["deal_sourcing", "first_contact", "due_diligence", "ic_review", "passed", "invested"]
+    current = company.get("pipeline_stage", "deal_sourcing") if company else "deal_sourcing"
+
+    st.markdown("**Move to stage:**")
+    cols = st.columns(len(stages))
+    for i, stage in enumerate(stages):
+        with cols[i]:
+            is_current = stage == current
+            if st.button(
+                pipeline_stage_label(stage),
+                key=f"stage_{stage}",
+                disabled=is_current,
+                type="primary" if is_current else "secondary",
+            ):
+                sc = scorer.score_company(company_id, st.session_state.user_id)
+                db.add_pipeline_event(
+                    company_id=company_id,
+                    from_stage=current,
+                    to_stage=stage,
+                    changed_by=st.session_state.user_id,
+                    score_snapshot=sc.overall_score,
+                    triggered_by="manual",
+                )
+                # Update current stage on company row
+                db.update_company_stage(company_id, stage)
+                st.rerun()
+
+    st.divider()
+    st.markdown("### Stage History")
+
+    if not history:
+        st.info("No stage transitions recorded yet.")
+        return
+
+    rows = []
+    for event in history:
+        rows.append({
+            "Date": str(event.get("changed_at", ""))[:10],
+            "From": pipeline_stage_label(event.get("from_stage", "")),
+            "To": pipeline_stage_label(event.get("to_stage", "")),
+            "Changed by": event.get("changed_by", ""),
+            "Triggered by": event.get("triggered_by", ""),
+            "Score at transition": f"{event['score_snapshot']:.2f}" if event.get("score_snapshot") else "—",
+        })
+
+    st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Table Browser tab
+# ---------------------------------------------------------------------------
+
+def render_table_browser():
+    """Raw table viewer for all 8 DB tables — for demo transparency."""
+    st.markdown("### 🗃️ Table Browser")
+    st.caption(
+        "Browse the raw database tables. This shows the exact data structure "
+        "powering the scoring system — full audit trail."
+    )
+
+    tables = [
+        "company",
+        "metric_type",
+        "metric",
+        "data_source",
+        "company_metric_value",
+        "user_weight",
+        "pipeline_event",
+        "gap_action",
+    ]
+
+    selected_table = st.selectbox("Select table", tables)
+
+    try:
+        rows = db.get_table_rows(selected_table, limit=200)
+    except Exception as e:
+        st.error(f"Could not load table: {e}")
+        return
+
+    if not rows:
+        st.info(f"Table `{selected_table}` is empty.")
+        return
+
+    df = pd.DataFrame(rows)
+    st.caption(f"{len(df)} rows from `{selected_table}`")
+    st.dataframe(df, use_container_width=True, hide_index=True)
+
+
+# ---------------------------------------------------------------------------
+# Main layout
+# ---------------------------------------------------------------------------
+
+def main():
+    render_sidebar()
+
+    if st.session_state.show_weight_editor:
+        render_weight_editor()
+
+    company_id = st.session_state.selected_company_id
+    if not company_id:
+        st.info("Select a company from the sidebar to view its scorecard.")
+        return
+
+    company = db.get_company(company_id)
+    company_name = company["name"] if company else "Unknown"
+
+    st.markdown(f"# {company_name}")
+    st.markdown(
+        f'<span style="color:#9ca3af;font-size:0.9rem">'
+        f'{company.get("industry","") if company else ""} · '
+        f'{company.get("country","") if company else ""} · '
+        f'{company.get("source_type","").title() if company else ""} via '
+        f'{company.get("source_channel","") if company else ""}'
+        f"</span>",
+        unsafe_allow_html=True,
+    )
+    st.divider()
+
+    tab_scorecard, tab_pipeline, tab_tables = st.tabs(
+        ["🏆 Scorecard", "📋 Pipeline", "🗃️ Table Browser"]
+    )
+
+    with tab_scorecard:
+        render_scorecard_tab(company_id)
+
+    with tab_pipeline:
+        render_pipeline_tab(company_id)
+
+    with tab_tables:
+        render_table_browser()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,15 @@
+# Environment — never commit real keys
+.env
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# macOS
+.DS_Store
