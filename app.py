@@ -671,10 +671,38 @@ def render_company_intel(company_id: str, sc):
     if not company:
         return
 
+    # ---------- Discovery provenance banner ----------
+    # If this company was found by Alpha Scout, surface the trust signals:
+    # grounding score + the source URL the evidence came from. This is the
+    # single most important UX moment for demo — we SHOW the audit trail.
+    if company.get("discovery_source_url") or company.get("source_channel") == "alpha_scout":
+        grounding = company.get("discovery_grounding_score")
+        grounding_pct = f"{grounding:.0%}" if grounding is not None else "n/a"
+        # Colour the pill: green ≥80%, amber 50–79%, red <50%
+        pill_color = (
+            "#065f46" if (grounding or 0) >= 0.8
+            else "#92400e" if (grounding or 0) >= 0.5
+            else "#7f1d1d"
+        )
+        src_link = (
+            f' · <a href="{company["discovery_source_url"]}" target="_blank" '
+            f'style="color:#93c5fd">source</a>'
+            if company.get("discovery_source_url") else ""
+        )
+        st.markdown(
+            f'<div style="background:{pill_color};color:white;padding:4px 10px;'
+            f'border-radius:6px;display:inline-block;font-size:0.8rem;margin-bottom:8px">'
+            f'🔎 Discovered by Alpha Scout · grounding {grounding_pct}{src_link}'
+            f'</div>',
+            unsafe_allow_html=True,
+        )
+
     # ---------- Links row ----------
+    # ✓ badge on website if we HTTP-verified it during discovery.
     link_bits = []
     if company.get("website"):
-        link_bits.append(f"🌐 [Website]({company['website']})")
+        verified_badge = " ✓" if company.get("website_verified") else ""
+        link_bits.append(f"🌐 [Website{verified_badge}]({company['website']})")
     if company.get("linkedin_url"):
         link_bits.append(f"💼 [Company LinkedIn]({company['linkedin_url']})")
     if link_bits:
@@ -687,15 +715,30 @@ def render_company_intel(company_id: str, sc):
         cols = st.columns(min(len(founders), 3))
         for i, f in enumerate(founders):
             with cols[i % len(cols)]:
-                # Compact card per founder. LinkedIn is the primary CTA.
-                linkedin_link = (
-                    f"[💼 LinkedIn]({f['linkedin_url']})"
-                    if f.get("linkedin_url") else "_no LinkedIn_"
-                )
+                # Compact card per founder. LinkedIn is the primary CTA,
+                # but ONLY if verified — otherwise we show an ⚠️ warning so
+                # the analyst knows not to trust the link blindly.
+                linkedin_url = f.get("linkedin_url")
+                if linkedin_url and f.get("linkedin_verified"):
+                    # Green check — snippet confirmed this LinkedIn is for our company
+                    linkedin_html = (
+                        f"[💼 LinkedIn ✓]({linkedin_url})"
+                    )
+                elif linkedin_url:
+                    # URL found but snippet didn't mention company → show big warning
+                    linkedin_html = (
+                        f'<a href="{linkedin_url}" target="_blank" '
+                        f'style="color:#f59e0b">⚠️ LinkedIn (unverified)</a>'
+                        f'<br><span style="font-size:0.7rem;color:#9ca3af">'
+                        f'Search snippet did not mention the company — verify manually</span>'
+                    )
+                else:
+                    linkedin_html = "_no LinkedIn_"
+
                 st.markdown(
                     f"**{f['name']}**  \n"
                     f"<span style='color:#9ca3af;font-size:0.85rem'>{f.get('title','')}</span>  \n"
-                    f"{linkedin_link}",
+                    f"{linkedin_html}",
                     unsafe_allow_html=True,
                 )
 
