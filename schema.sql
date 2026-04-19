@@ -369,3 +369,183 @@ SELECT
 FROM company c
 LEFT JOIN must_have_check mhc ON mhc.company_id = c.id
 LEFT JOIN base_score      bs  ON bs.company_id  = c.id;
+
+
+-- ============================================================
+-- PHASE 1 — DATA PLATFORM FOUNDATION (2026-04)
+-- ============================================================
+-- Five new tables that move the architecture from "one flat fact table"
+-- to a full provenance chain:
+--
+--   source_document  →  extraction_run  →  metric_observation  →  company_metric_value
+--                           ▲
+--                       extractor (registry)
+--
+-- Also: source_chunk (for long docs, supports Phase 4 RAG).
+-- Also: ALTER company_metric_value to point at the winning observation.
+--
+-- See ARCHITECTURE.md §5 for the full schema rationale.
+-- All tables are additive and idempotent (IF NOT EXISTS) so the file can
+-- safely be re-run against an existing Supabase database.
+-- ============================================================
+
+
+-- ------------------------------------------------------------
+-- SOURCE_DOCUMENT — one row per ingested artifact (PDF, email,
+-- meeting note, Notion page, etc). Bronze layer in the medallion.
+-- Content-hashed so re-ingesting the same file is a no-op.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS source_document (
+    id                 UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    content_hash       TEXT NOT NULL UNIQUE,       -- sha256 of raw bytes; dedup key
+    source_type        TEXT NOT NULL,              -- pitchdeck|meeting_note|email|notion_page|crm_record|web_page|analyst_note|seed
+    source_subtype     TEXT,                       -- pdf|markdown|eml|html|csv
+    origin             TEXT NOT NULL,              -- dropbox|manual_upload|gmail|tavily|notion_api|seed
+    origin_path        TEXT,                       -- /Dropbox/.../tabby_deck.pdf
+    origin_url         TEXT,                       -- source URL for web/external docs
+    mime_type          TEXT,
+    size_bytes         BIGINT,
+    ingested_at        TIMESTAMPTZ DEFAULT NOW(),
+    ingested_by        TEXT,                       -- analyst email or bot name
+    text_extracted_at  TIMESTAMPTZ,                -- when we pulled raw text
+    text_chars         INT,                        -- length of extracted text
+    notes              TEXT,
+    created_at         TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_document_type
+    ON source_document (source_type, ingested_at DESC);
+
+COMMENT ON TABLE source_document IS
+    'One row per ingested source artifact (pitch deck, meeting note, email, Notion page, web page, or seed record). Bronze layer. Content-hashed for dedup.';
+
+COMMENT ON COLUMN source_document.content_hash IS
+    'SHA-256 of the raw bytes. Used as a dedup key so re-ingesting the same file is a no-op.';
+
+
+-- ------------------------------------------------------------
+-- SOURCE_CHUNK — long documents split for semantic retrieval.
+-- The `embedding` column stays NULL until Phase 4 (pgvector + HNSW).
+-- Keeping the column here now so the Phase 1 migration doesn't need
+-- to re-ALTER later.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS source_chunk (
+    id                  UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_document_id  UUID NOT NULL REFERENCES source_document(id) ON DELETE CASCADE,
+    chunk_idx           INT NOT NULL,               -- 0-indexed order within the doc
+    page                INT,                        -- page number for PDFs
+    text                TEXT NOT NULL,
+    embedding           FLOAT[],                    -- placeholder; upgrade to vector() in Phase 4
+    embedded_at         TIMESTAMPTZ,
+    created_at          TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (source_document_id, chunk_idx)
+);
+
+CREATE INDEX IF NOT EXISTS idx_source_chunk_document
+    ON source_chunk (source_document_id, chunk_idx);
+
+COMMENT ON TABLE source_chunk IS
+    'Long documents split into chunks (~500 tokens) for retrieval. `embedding` is FLOAT[] placeholder until Phase 4 migrates it to pgvector.';
+
+
+-- ------------------------------------------------------------
+-- EXTRACTOR — registry of extractors. One row per (name, version).
+-- Every metric_observation must point at an extractor — this is how
+-- we know "who produced this fact and with what code version".
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS extractor (
+    id                       UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    name                     TEXT NOT NULL,                -- pitchdeck_gemini_v1|alpha_scout_v1|analyst_override|seed_data_v1
+    version                  TEXT NOT NULL,                -- semver
+    supported_source_types   TEXT[] NOT NULL,              -- e.g. {pitchdeck}
+    supported_metric_ids     UUID[],                       -- NULL = can produce any metric
+    description              TEXT,
+    created_at               TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE (name, version)
+);
+
+COMMENT ON TABLE extractor IS
+    'Registry of extractors. Every metric_observation points at one. Versioned so re-running with a new extractor version preserves old observations.';
+
+
+-- ------------------------------------------------------------
+-- EXTRACTION_RUN — one row per execution of an extractor against
+-- a source (or against "nothing" for synthetic runs like the Phase 1
+-- backfill and analyst overrides).
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS extraction_run (
+    id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    extractor_id         UUID NOT NULL REFERENCES extractor(id) ON DELETE RESTRICT,
+    source_document_id   UUID REFERENCES source_document(id) ON DELETE SET NULL,
+    company_id           UUID REFERENCES company(id) ON DELETE SET NULL,
+    started_at           TIMESTAMPTZ DEFAULT NOW(),
+    finished_at          TIMESTAMPTZ,
+    status               TEXT NOT NULL DEFAULT 'success'
+                            CHECK (status IN ('running','success','error','partial')),
+    observations_count   INT DEFAULT 0,
+    error_message        TEXT,
+    cost_usd             FLOAT,
+    created_at           TIMESTAMPTZ DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_run_company
+    ON extraction_run (company_id, started_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_extraction_run_document
+    ON extraction_run (source_document_id, started_at DESC);
+
+COMMENT ON TABLE extraction_run IS
+    'One row per execution of an extractor. source_document_id and company_id may be NULL for non-document runs (e.g. discovery, analyst overrides, backfills).';
+
+
+-- ------------------------------------------------------------
+-- METRIC_OBSERVATION — the append-only, immutable fact table.
+-- Every claim about a (company, metric) is a row here. The canonical
+-- "winning" value is picked by the value resolver and cached on
+-- company_metric_value.winning_observation_id.
+-- ------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS metric_observation (
+    id                   UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    extraction_run_id    UUID NOT NULL REFERENCES extraction_run(id) ON DELETE CASCADE,
+    company_id           UUID NOT NULL REFERENCES company(id) ON DELETE CASCADE,
+    metric_id            UUID NOT NULL REFERENCES metric(id) ON DELETE CASCADE,
+    raw_value            TEXT,                       -- "$250k MRR", "Series C", "has 2 prior exits"
+    normalized_value     TEXT NOT NULL,              -- "250000", "5", "true" — matches metric.value_type
+    source_document_id   UUID REFERENCES source_document(id) ON DELETE SET NULL,
+    source_chunk_id      UUID REFERENCES source_chunk(id) ON DELETE SET NULL,
+    evidence_text        TEXT,                       -- literal quote supporting the claim
+    evidence_url         TEXT,                       -- for external/web sources
+    confidence           FLOAT DEFAULT 1.0,          -- 0.0-1.0
+    captured_at          TIMESTAMPTZ DEFAULT NOW(),
+    created_at           TIMESTAMPTZ DEFAULT NOW(),
+
+    -- At most one observation per (run, company, metric). Re-running the same
+    -- extractor on the same input is idempotent.
+    UNIQUE (extraction_run_id, company_id, metric_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_metric_observation_company_metric
+    ON metric_observation (company_id, metric_id, captured_at DESC);
+
+CREATE INDEX IF NOT EXISTS idx_metric_observation_document
+    ON metric_observation (source_document_id);
+
+COMMENT ON TABLE metric_observation IS
+    'Immutable, append-only fact table. Every claim about (company, metric) is a row here. company_metric_value picks one as the canonical "winning" value via the resolver.';
+
+
+-- ------------------------------------------------------------
+-- REFACTOR company_metric_value — add pointers to the winning
+-- observation and (future) context fact. Keep override/override_reason
+-- on this table because analyst overrides are the ONE case where the
+-- canonical value is not derived from any observation.
+-- ------------------------------------------------------------
+ALTER TABLE company_metric_value
+    ADD COLUMN IF NOT EXISTS winning_observation_id         UUID REFERENCES metric_observation(id) ON DELETE SET NULL,
+    ADD COLUMN IF NOT EXISTS derived_from_context_fact_id   UUID;  -- FK target added in Phase 3
+
+COMMENT ON COLUMN company_metric_value.winning_observation_id IS
+    'The metric_observation row chosen as the canonical value by the resolver. NULL when override=TRUE or when the row was seeded pre-Phase-1.';
+
+COMMENT ON COLUMN company_metric_value.derived_from_context_fact_id IS
+    'Set when the value comes from a dimensional context_fact (e.g. industry CAGR). Populated in Phase 3.';

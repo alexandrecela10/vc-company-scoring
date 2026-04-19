@@ -651,7 +651,7 @@ SQL (too complex to maintain as a stored procedure).
 
 | Phase | Scope | Duration | Demoable outcome |
 |---|---|---|---|
-| **1. Foundation** | `source_document`, `source_chunk`, `extractor`, `extraction_run`, `metric_observation`. Refactor `company_metric_value` to derived. Migrate existing data as synthetic runs. Introduce `platform/` + `analytics/` directories. | ~2 days | Click any metric value → see its full provenance chain, including the originating document and chunk. |
+| **1. Foundation** | `source_document`, `source_chunk`, `extractor`, `extraction_run`, `metric_observation`. Refactor `company_metric_value` to derived. Migrate existing data as synthetic runs. Introduce `pipeline/` + `analytics/` directories. | ~2 days | Click any metric value → see its full provenance chain, including the originating document and chunk. |
 | **2. Ingestion** | Dropbox watcher (polling). Two extractors: `pitchdeck_gemini_v1`, `meeting_note_md_v1`. `company_alias` + entity resolver. UI: document list per company. | ~3 days | Drop a PDF into Dropbox → auto-linked to company → metrics appear in scorecard. |
 | **3. Context + scheduling** | `context_fact`, `context_dimension`, `scheduled_job`, `job_run`. `market_refresh.py` biweekly job. UI: market card per company. | ~2 days | One cron job refreshes 50 companies' market signals. UI shows "refreshed 3d ago". |
 | **4. Hybrid retrieval (Tier 2)** | `pgvector` HNSW + Postgres FTS `tsvector` on `source_chunk`. RRF fusion function. Optional cross-encoder reranker. RAG grounding for gap agent. Semantic search box in UI. | ~3 days | Type "unit economics" in a company's search — hybrid retrieval returns best-ranked chunks across all sources, exact terms AND conceptual matches. |
@@ -729,7 +729,7 @@ company_scorer/
 ├── discovery.py                    # Existing; wrapped as an extractor adapter in Phase 2
 ├── founder_linkedin.py             # Existing
 │
-├── platform/                       # NEW (Phase 1) — data platform (producer)
+├── pipeline/                       # NEW (Phase 1) — data pipeline (producer, the "platform" layer)
 │   ├── ingestion/
 │   │   ├── dropbox_watcher.py      # Phase 2
 │   │   └── manual_upload.py        # Phase 2
@@ -762,9 +762,9 @@ company_scorer/
 
 **Boundary rules** (enforced in code review, not by the repo layout):
 
-1. `platform/*` **writes** to Postgres; `app.py` **reads** only.
-2. `analytics/*` is **read-only** over the platform's output — it must never reach back into `platform/`.
-3. Extractors in `platform/extractors/` must implement `base.Extractor` — NO exceptions, NO ad-hoc shapes.
+1. `pipeline/*` **writes** to Postgres; `app.py` **reads** only.
+2. `analytics/*` is **read-only** over the pipeline's output — it must never reach back into `pipeline/`.
+3. Extractors in `pipeline/extractors/` must implement `base.Extractor` — NO exceptions, NO ad-hoc shapes.
 4. New tables touching `metric_observation` / `company_metric_value` require an update to both `schema.sql` AND `ARCHITECTURE.md` in the same PR.
 
 **When to split into two repos** (future):

@@ -434,3 +434,27 @@ INSERT INTO pipeline_event (company_id, from_stage, to_stage, changed_by, trigge
     ('44444444-0000-0000-0000-000000000001', 'deal_sourcing', 'first_contact',  'analyst_alex', 'manual',          3.8),
     ('44444444-0000-0000-0000-000000000001', 'first_contact',  'due_diligence', 'analyst_alex', 'score_threshold', 4.1),
     ('44444444-0000-0000-0000-000000000003', 'deal_sourcing', 'first_contact',  'analyst_alex', 'manual',          3.2);
+
+
+-- ============================================================
+-- PHASE 1 — BUILT-IN EXTRACTORS
+-- Every metric_observation must reference an extractor. These three
+-- cover the universe of how values currently enter the system:
+--   seed_data_v1     — values baked into seed.sql (our demo dataset)
+--   analyst_override — a human manually locked a value via the UI
+--   alpha_scout_v1   — values produced by the discovery pipeline
+-- Future extractors (pitchdeck_gemini_v1, meeting_note_md_v1, …)
+-- will be registered as they are built. UUIDs are fixed so the
+-- Phase 1 backfill script can reference them by ID.
+-- ============================================================
+INSERT INTO extractor (id, name, version, supported_source_types, description) VALUES
+    ('55555555-0000-0000-0000-000000000001',
+        'seed_data_v1', '1.0', '{seed}',
+        'Values hand-authored in seed.sql for the demo dataset. Synthetic source document per company carries the seed text as evidence.'),
+    ('55555555-0000-0000-0000-000000000002',
+        'analyst_override', '1.0', '{analyst_note}',
+        'Analyst manually set a value via the UI. Always wins the resolver (highest source priority).'),
+    ('55555555-0000-0000-0000-000000000003',
+        'alpha_scout_v1', '1.0', '{web_page}',
+        'Alpha Scout discovery pipeline. Produces observations for Employee Count, Funding Stage, Founding Year based on Tavily + Gemini enrichment, grounded against trusted MENA / global sources.')
+ON CONFLICT (name, version) DO NOTHING;
