@@ -122,9 +122,18 @@ def get_metric_types() -> List[Dict]:
 # ---------------------------------------------------------------------------
 
 def get_metrics_for_type(metric_type_id: str) -> List[Dict]:
-    """Return all metrics belonging to a given metric type."""
+    """Return metrics belonging to a metric type.
+
+    Only returns metrics that count for scoring (active + deprecated).
+    Draft and archived metrics are hidden so scorecards stay consistent.
+    """
     return _fetchall(
-        "SELECT * FROM metric WHERE metric_type_id = %s", (metric_type_id,)
+        """
+        SELECT * FROM metric
+        WHERE metric_type_id = %s
+          AND lifecycle_state IN ('active','deprecated')
+        """,
+        (metric_type_id,),
     )
 
 
@@ -133,6 +142,8 @@ def get_all_metrics() -> List[Dict]:
     Return all metrics with their parent metric_type fields nested under 'metric_type'.
     Mimics the Supabase select('*, metric_type(...)') join pattern.
     """
+    # Only active + deprecated metrics count toward the scorecard.
+    # Draft metrics are dry-run; archived metrics are soft-deleted.
     rows = _fetchall("""
         SELECT
             m.*,
@@ -141,6 +152,7 @@ def get_all_metrics() -> List[Dict]:
             mt.house_weight AS mt_house_weight
         FROM metric m
         JOIN metric_type mt ON mt.id = m.metric_type_id
+        WHERE m.lifecycle_state IN ('active','deprecated')
     """)
     # Nest metric_type fields into a sub-dict so scorer.py can do row['metric_type']['name']
     for r in rows:

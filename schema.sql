@@ -549,3 +549,135 @@ COMMENT ON COLUMN company_metric_value.winning_observation_id IS
 
 COMMENT ON COLUMN company_metric_value.derived_from_context_fact_id IS
     'Set when the value comes from a dimensional context_fact (e.g. industry CAGR). Populated in Phase 3.';
+
+
+-- =====================================================================
+-- Phase 2a migration: metric lifecycle states
+-- =====================================================================
+-- Why: we need to pause or retire a metric without deleting history.
+--
+-- States:
+--   draft       -> extractors may run, but metric does NOT affect scores
+--                  (safe A/B before committing to the scoring formula)
+--   active      -> normal: extracted, scored, shown in UI
+--   deprecated  -> no new extraction, existing values still score
+--                  (graceful sunset so complete companies don't suddenly
+--                   become "incomplete" when a must-have is retired)
+--   archived    -> excluded everywhere; historical observations preserved
+--
+-- Default is 'active' so all 18 existing metrics keep their current behaviour.
+-- =====================================================================
+ALTER TABLE metric
+    ADD COLUMN IF NOT EXISTS lifecycle_state TEXT
+        NOT NULL DEFAULT 'active'
+        CHECK (lifecycle_state IN ('draft','active','deprecated','archived')),
+    ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+
+COMMENT ON COLUMN metric.lifecycle_state IS
+    'draft=dry-run (no scoring), active=normal, deprecated=no new extraction but still scores, archived=excluded everywhere';
+COMMENT ON COLUMN metric.deactivated_at IS
+    'Timestamp when metric left the active state. Set manually when flipping to deprecated/archived.';
+
+-- Rebuild company_score_view so draft + archived metrics drop out of scoring.
+-- Only latest_values CTE changes (one extra WHERE clause); everything else identical.
+-- (Phase 2a view rebuild — also appended a code column migration after this block.)
+CREATE OR REPLACE VIEW company_score_view AS
+WITH
+latest_values AS (
+    SELECT
+        cmv.company_id,
+        cmv.metric_id,
+        m.metric_type_id,
+        m.weight         AS metric_weight,
+        m.must_have      AS metric_must_have,
+        mt.must_have     AS type_must_have,
+        mt.house_weight  AS type_weight,
+        CASE
+            WHEN cmv.value ~ '^[0-9]+(\.[0-9]+)?$' THEN cmv.value::FLOAT
+            WHEN cmv.value = 'true'  THEN 1.0
+            WHEN cmv.value = 'false' THEN 0.0
+            ELSE NULL
+        END AS numeric_value
+    FROM company_metric_value cmv
+    JOIN metric m    ON m.id = cmv.metric_id
+    JOIN metric_type mt ON mt.id = m.metric_type_id
+    WHERE cmv.is_latest = TRUE
+      AND m.lifecycle_state IN ('active','deprecated')   -- NEW: exclude draft + archived
+),
+type_scores AS (
+    SELECT
+        company_id,
+        metric_type_id,
+        type_must_have,
+        type_weight,
+        SUM(numeric_value * metric_weight) / NULLIF(SUM(metric_weight), 0) AS type_score,
+        BOOL_AND(
+            CASE WHEN metric_must_have THEN numeric_value IS NOT NULL ELSE TRUE END
+        ) AS has_required_values
+    FROM latest_values
+    GROUP BY company_id, metric_type_id, type_must_have, type_weight
+),
+must_have_check AS (
+    SELECT
+        ts.company_id,
+        BOOL_AND(
+            CASE WHEN ts.type_must_have THEN ts.type_score IS NOT NULL ELSE TRUE END
+        ) AS all_must_haves_present,
+        EXP(
+            SUM(
+                CASE WHEN ts.type_must_have AND ts.type_score IS NOT NULL
+                    THEN LN(GREATEST(ts.type_score, 0.01) / 5.0)
+                    ELSE 0
+                END
+            )
+        ) AS must_have_multiplier
+    FROM type_scores ts
+    GROUP BY ts.company_id
+),
+base_score AS (
+    SELECT
+        company_id,
+        SUM(type_score * type_weight) / NULLIF(SUM(type_weight), 0) AS weighted_avg_score
+    FROM type_scores
+    GROUP BY company_id
+)
+SELECT
+    c.id   AS company_id,
+    c.name AS company_name,
+    c.pipeline_stage,
+    CASE
+        WHEN mhc.all_must_haves_present
+            THEN ROUND(
+                (bs.weighted_avg_score * mhc.must_have_multiplier)::NUMERIC, 2
+            )
+        ELSE NULL
+    END AS overall_score,
+    mhc.all_must_haves_present,
+    mhc.must_have_multiplier,
+    bs.weighted_avg_score
+FROM company c
+LEFT JOIN must_have_check mhc ON mhc.company_id = c.id
+LEFT JOIN base_score      bs  ON bs.company_id  = c.id;
+
+
+-- =====================================================================
+-- Phase 2a migration: metric.code (stable snake_case identifier)
+-- =====================================================================
+-- Why: rules.yaml, gap_action codes, and future analytics filters need a
+-- stable reference to each metric. metric.name is human-readable and
+-- editable; metric.id is a UUID (unreadable in YAML). metric.code fills
+-- the gap.
+--
+-- Contract:
+--   * snake_case, starts with a lowercase letter
+--   * UNIQUE (one code per metric, one metric per code)
+--   * Nullable -- legacy metrics without extraction rules can stay NULL
+--   * Immutable by convention (renaming a code breaks rules.yaml)
+-- =====================================================================
+ALTER TABLE metric
+    ADD COLUMN IF NOT EXISTS code TEXT UNIQUE
+        CHECK (code IS NULL OR code ~ '^[a-z][a-z0-9_]*$');
+
+COMMENT ON COLUMN metric.code IS
+    'Stable snake_case identifier used by rules.yaml and non-UI callers. '
+    'Immutable by convention. NULL for legacy metrics without extraction rules.';
