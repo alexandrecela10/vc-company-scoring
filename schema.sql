@@ -169,6 +169,48 @@ CREATE INDEX IF NOT EXISTS idx_news_company_fetched
 
 
 -- ============================================================
+-- Migration: DISCOVERY PROVENANCE
+-- Every company either came from an analyst (inbound/outbound) OR from
+-- the Alpha Scout discovery pipeline. These columns let us:
+--   - trace each company back to the source URL we found it at
+--   - show a grounding score in the UI (how trustworthy is this discovery?)
+--   - flag when the website has been HTTP-verified to actually exist
+-- All new columns are nullable so existing seeded rows stay valid.
+-- ============================================================
+ALTER TABLE company
+    ADD COLUMN IF NOT EXISTS discovery_source_url       TEXT,
+    ADD COLUMN IF NOT EXISTS discovery_grounding_score  FLOAT,
+    ADD COLUMN IF NOT EXISTS website_verified           BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS discovered_at              TIMESTAMPTZ;
+
+-- Dedup index for discovery re-runs.
+-- Uses a normalized lowercase name so "NovaPay" and "novapay" don't collide.
+-- Partial index (WHERE name IS NOT NULL) keeps it small and safe on NULLs.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_company_name_lower
+    ON company (LOWER(name))
+    WHERE name IS NOT NULL;
+
+
+-- ============================================================
+-- Migration: FOUNDER LINKEDIN VERIFICATION
+-- Founder LinkedIn URLs are high-risk for hallucination (wrong person
+-- with same name). We ALWAYS store whether the URL was verified:
+--   verified=TRUE  → snippet at that URL mentions the company
+--   verified=FALSE → URL stored but UI shows ⚠️ "unverified"
+-- We never silently guess — the UI makes uncertainty visible.
+-- ============================================================
+ALTER TABLE founder
+    ADD COLUMN IF NOT EXISTS linkedin_verified      BOOLEAN DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS linkedin_verified_at   TIMESTAMPTZ,
+    ADD COLUMN IF NOT EXISTS linkedin_source_url    TEXT;
+
+-- Prevent duplicate founder rows on re-discovery of the same company.
+-- (company_id, lower(name)) is the natural key.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_founder_company_name_lower
+    ON founder (company_id, LOWER(name));
+
+
+-- ============================================================
 -- 6. USER WEIGHT
 -- Per-analyst weights for each metric type.
 -- user_id = 'house' is the institutional default used by the

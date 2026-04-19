@@ -382,6 +382,127 @@ def get_founders(company_id: str) -> List[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Discovery upserts — called by discovery.py after Alpha Scout finds a company
+#
+# Both are idempotent: re-running discovery with the same seed updates
+# existing rows instead of creating duplicates. The UNIQUE indexes on
+# LOWER(company.name) and (company_id, LOWER(founder.name)) enforce this.
+# ---------------------------------------------------------------------------
+
+def upsert_company_discovery(
+    name: str,
+    website: Optional[str],
+    linkedin_url: Optional[str],
+    country: Optional[str],
+    industry: Optional[str],
+    discovery_source_url: Optional[str],
+    discovery_grounding_score: Optional[float],
+    website_verified: bool = False,
+    notes: Optional[str] = None,
+) -> Dict:
+    """
+    Insert a company discovered by Alpha Scout, or update if it already exists.
+    Dedup key is LOWER(name). Returns the company row (new or existing).
+
+    We deliberately keep source_type='outbound' and source_channel='alpha_scout'
+    so the UI clearly shows which companies came from discovery vs analyst inbound.
+    """
+    row = _execute("""
+        INSERT INTO company (
+            name, website, linkedin_url, country, industry,
+            source_type, source_channel, notes,
+            discovery_source_url, discovery_grounding_score,
+            website_verified, discovered_at, pipeline_stage
+        )
+        VALUES (
+            %s, %s, %s, %s, %s,
+            'outbound', 'alpha_scout', %s,
+            %s, %s,
+            %s, NOW(), 'deal_sourcing'
+        )
+        ON CONFLICT (name) DO UPDATE SET
+            website                   = COALESCE(EXCLUDED.website, company.website),
+            linkedin_url              = COALESCE(EXCLUDED.linkedin_url, company.linkedin_url),
+            country                   = COALESCE(EXCLUDED.country, company.country),
+            industry                  = COALESCE(EXCLUDED.industry, company.industry),
+            discovery_source_url      = COALESCE(EXCLUDED.discovery_source_url, company.discovery_source_url),
+            discovery_grounding_score = COALESCE(EXCLUDED.discovery_grounding_score, company.discovery_grounding_score),
+            website_verified          = company.website_verified OR EXCLUDED.website_verified,
+            discovered_at             = COALESCE(company.discovered_at, EXCLUDED.discovered_at)
+        RETURNING *
+    """, (
+        name, website, linkedin_url, country, industry,
+        notes,
+        discovery_source_url, discovery_grounding_score,
+        website_verified,
+    ))
+    return row or {}
+
+
+def upsert_founder_unverified(
+    company_id: str,
+    name: str,
+    title: Optional[str] = None,
+) -> Dict:
+    """
+    Insert a founder row with linkedin_verified=FALSE and no URL.
+    The founder_linkedin.py resolver will later attempt verification and
+    update the row via mark_founder_linkedin_verified(...).
+
+    Dedup key: (company_id, LOWER(name)) so re-discovery doesn't duplicate.
+    """
+    row = _execute("""
+        INSERT INTO founder (company_id, name, title, linkedin_verified)
+        VALUES (%s, %s, %s, FALSE)
+        ON CONFLICT (company_id, LOWER(name)) DO UPDATE SET
+            title = COALESCE(EXCLUDED.title, founder.title)
+        RETURNING *
+    """, (company_id, name, title))
+    return row or {}
+
+
+def mark_founder_linkedin_verified(
+    founder_id: str,
+    linkedin_url: str,
+    verified: bool,
+    source_url: Optional[str] = None,
+) -> None:
+    """
+    Update a founder row with their resolved LinkedIn.
+    `verified=True` means the snippet at linkedin_url mentioned the company;
+    `verified=False` means we found a candidate but couldn't confirm.
+    UI must render a ⚠️ badge for unverified rows.
+    """
+    _execute("""
+        UPDATE founder SET
+            linkedin_url          = %s,
+            linkedin_verified     = %s,
+            linkedin_verified_at  = NOW(),
+            linkedin_source_url   = COALESCE(%s, linkedin_source_url)
+        WHERE id = %s
+    """, (linkedin_url, verified, source_url, founder_id))
+
+
+def get_or_create_data_source(name: str, source_type: str = "Platform") -> str:
+    """Return the UUID of a data_source, creating it if missing."""
+    existing = get_source_by_name(name)
+    if existing:
+        return str(existing["id"])
+    row = _execute("""
+        INSERT INTO data_source (name, source_type, can_automate, cost_tier, notes)
+        VALUES (%s, %s, TRUE, 'low', 'Auto-created by discovery pipeline')
+        ON CONFLICT (name) DO UPDATE SET name = EXCLUDED.name
+        RETURNING id
+    """, (name, source_type))
+    return str(row["id"]) if row else ""
+
+
+def get_metric_by_id(metric_id: str) -> Optional[Dict]:
+    """Return a single metric row by UUID — used when discovery seeds values by known metric id."""
+    return _fetchone("SELECT * FROM metric WHERE id = %s", (metric_id,))
+
+
+# ---------------------------------------------------------------------------
 # News cache — populated on-demand by company_intel.fetch_news()
 # ---------------------------------------------------------------------------
 
