@@ -20,6 +20,7 @@ Table Browser tab:
 import streamlit as st
 import pandas as pd
 import math
+import time
 from datetime import datetime
 from typing import Optional
 
@@ -27,6 +28,10 @@ import db
 import scorer
 import market_agent
 from scorer import CompanyScorecard, MetricTypeScore, MetricScore
+
+# Track render start so we can show a live perf number in the sidebar footer.
+# This is the single source of truth for "how long did this rerun take?"
+_RENDER_START = time.perf_counter()
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -47,14 +52,34 @@ if "user_id" not in st.session_state:
     st.session_state.user_id = "house"
 if "show_weight_editor" not in st.session_state:
     st.session_state.show_weight_editor = False
-# Incremented after every write (agent action, override, stage change).
-# Used as a cache key so st.cache_data invalidates exactly when data changes.
+# Two-tier cache invalidation:
+#   - data_version: bumped for GLOBAL writes (weights, new companies).
+#     Invalidates cross-company caches like the company list.
+#   - company_versions[cid]: bumped for writes scoped to ONE company.
+#     Lets us invalidate ONLY that company's scorecard/intel, so clicking
+#     an override on company A doesn't force re-scoring of B, C, D.
 if "data_version" not in st.session_state:
     st.session_state.data_version = 0
+if "company_versions" not in st.session_state:
+    st.session_state.company_versions = {}
+
+
+def company_version(company_id: str) -> int:
+    """Return the current cache-key version for this company.
+    Combined with global data_version so either can trigger invalidation."""
+    return st.session_state.company_versions.get(company_id, 0) + st.session_state.data_version
+
+
+def bump_company(company_id: str):
+    """Call after a write that affects ONLY this company.
+    Examples: override, agent run on this company, stage transition, news fetch."""
+    v = st.session_state.company_versions.get(company_id, 0)
+    st.session_state.company_versions[company_id] = v + 1
 
 
 def bump_data_version():
-    """Call this after any write to invalidate all cached reads."""
+    """Call after a GLOBAL write (weights, schema, new company).
+    Invalidates every cache that takes data_version as a key."""
     st.session_state.data_version += 1
 
 
@@ -69,13 +94,17 @@ def bump_data_version():
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=120, show_spinner=False)
-def cached_score_all(user_id: str, version: int):
-    return scorer.score_all_companies(user_id)
+def cached_score_company(company_id: str, user_id: str, version: int):
+    """Score ONE company. Keyed by company version so a write to another
+    company does NOT invalidate this entry — this is the main perf win."""
+    return scorer.score_company(company_id, user_id)
 
 
 @st.cache_data(ttl=120, show_spinner=False)
-def cached_score_company(company_id: str, user_id: str, version: int):
-    return scorer.score_company(company_id, user_id)
+def cached_list_companies(version: int):
+    """List all companies (id + name + industry) — cheap query, used by sidebar.
+    Keyed by GLOBAL version only (the list itself rarely changes)."""
+    return db.get_all_companies()
 
 
 @st.cache_data(ttl=120, show_spinner=False)
@@ -91,6 +120,16 @@ def cached_get_founders(company_id: str, version: int):
 @st.cache_data(ttl=120, show_spinner=False)
 def cached_get_news(company_id: str, version: int):
     return db.get_cached_news(company_id, limit=5)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_newest_news_fetch(company_id: str, version: int):
+    return db.newest_news_fetch(company_id)
+
+
+@st.cache_data(ttl=120, show_spinner=False)
+def cached_pipeline_history(company_id: str, version: int):
+    return db.get_pipeline_history(company_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -189,11 +228,26 @@ def render_sidebar():
         st.divider()
         st.markdown("### Companies")
 
-        # Load and score all companies (cached — only recomputes after writes)
+        # Per-company cached scoring: each company's score is cached under its
+        # own version key, so writes to company A do NOT invalidate B/C/D.
+        # On a rerun where nothing changed, this loop is all cache hits (~instant).
         try:
-            all_scorecards = cached_score_all(
-                st.session_state.user_id,
-                st.session_state.data_version,
+            companies = cached_list_companies(st.session_state.data_version)
+            all_scorecards = []
+            for c in companies:
+                try:
+                    sc = cached_score_company(
+                        c["id"],
+                        st.session_state.user_id,
+                        company_version(c["id"]),
+                    )
+                    all_scorecards.append(sc)
+                except Exception as e:
+                    # Per-company failure shouldn't kill the whole sidebar
+                    st.warning(f"Scoring failed for {c.get('name','?')}: {e}")
+            # Sort: scored first (high→low), then incomplete at the bottom
+            all_scorecards.sort(
+                key=lambda s: (s.overall_score is None, -(s.overall_score or 0))
             )
         except Exception as e:
             st.error(f"Could not load companies: {e}")
@@ -285,6 +339,8 @@ def render_weight_editor():
             )
             if new_w != current_w:
                 db.upsert_weight(st.session_state.user_id, mt["id"], new_w)
+                # Weights are GLOBAL — affect every company's score.
+                bump_data_version()
 
     st.divider()
 
@@ -443,7 +499,7 @@ def render_market_agent(company_id: str):
     if st.button("🔄 Refresh stale signals now", type="primary", key=f"mkt_{company_id}"):
         with st.spinner("Searching the web and extracting latest market data..."):
             results = [market_agent.refresh_one(s) for s in stale_for_this]
-        bump_data_version()
+        bump_company(company_id)  # only this company's data changed
 
         # Show each result inline
         for r in results:
@@ -497,7 +553,7 @@ def render_gap_actions(company_id: str):
         if st.button("🤖 Run gap agent now", type="primary", key=f"gap_{company_id}"):
             with st.spinner("Drafting emails and searching the web..."):
                 results = gap_agent.process_company(company_id)
-            bump_data_version()
+            bump_company(company_id)  # only this company's gaps changed
             for r in results:
                 icon = {"filled": "✅", "drafted": "✉️", "no_data": "ℹ️",
                         "error": "❌", "skipped": "⚠️"}.get(r["status"], "•")
@@ -540,13 +596,13 @@ def render_gap_actions(company_id: str):
                 if action.get("status") == "pending":
                     if st.button("Mark as Sent", key=f"sent_{action['id']}"):
                         db.update_gap_action_status(action["id"], "sent")
-                        bump_data_version()
+                        bump_company(company_id)
                         st.rerun()
             with col_b:
                 if action.get("status") in ("pending", "sent"):
                     if st.button("Mark Resolved", key=f"resolved_{action['id']}"):
                         db.update_gap_action_status(action["id"], "resolved")
-                        bump_data_version()
+                        bump_company(company_id)
                         st.rerun()
 
 
@@ -594,7 +650,7 @@ def render_override_editor(company_id: str, sc: CompanyScorecard):
                 override=True,
                 override_reason=override_reason,
             )
-            bump_data_version()
+            bump_company(company_id)  # this company's score will recompute
             st.success(f"Override saved for **{selected_ms.metric_name}**. Score will recompute.")
             st.rerun()
         else:
@@ -611,7 +667,7 @@ def render_company_intel(company_id: str, sc):
     """
     import company_intel
 
-    company = cached_get_company(company_id, st.session_state.data_version)
+    company = cached_get_company(company_id, company_version(company_id))
     if not company:
         return
 
@@ -625,7 +681,7 @@ def render_company_intel(company_id: str, sc):
         st.markdown(" &nbsp; · &nbsp; ".join(link_bits))
 
     # ---------- Founders ----------
-    founders = cached_get_founders(company_id, st.session_state.data_version)
+    founders = cached_get_founders(company_id, company_version(company_id))
     if founders:
         st.markdown("#### Founders")
         cols = st.columns(min(len(founders), 3))
@@ -645,8 +701,8 @@ def render_company_intel(company_id: str, sc):
 
     # ---------- News ----------
     st.markdown("#### Recent news")
-    news = cached_get_news(company_id, st.session_state.data_version)
-    last_fetch_row = db.newest_news_fetch(company_id) or {}
+    news = cached_get_news(company_id, company_version(company_id))
+    last_fetch_row = cached_newest_news_fetch(company_id, company_version(company_id)) or {}
     last_fetch = last_fetch_row.get("last_fetch")
 
     col_news, col_btn = st.columns([4, 1])
@@ -658,7 +714,7 @@ def render_company_intel(company_id: str, sc):
                     st.success(f"Fetched {n} articles.")
                 except Exception as e:
                     st.error(f"News fetch failed: {e}")
-            bump_data_version()
+            bump_company(company_id)
             st.rerun()
 
     with col_news:
@@ -691,7 +747,7 @@ def render_company_intel(company_id: str, sc):
                 user_id=st.session_state.user_id,
                 score_snapshot=sc.overall_score,
             )
-            bump_data_version()
+            bump_company(company_id)
             st.success("Moved to First Contact.")
             st.rerun()
 
@@ -709,7 +765,7 @@ def render_company_intel(company_id: str, sc):
                 user_id=st.session_state.user_id,
                 score_snapshot=sc.overall_score,
             )
-            bump_data_version()
+            bump_company(company_id)
             st.warning("Marked as passed.")
             st.rerun()
 
@@ -733,7 +789,7 @@ def render_scorecard_tab(company_id: str):
         sc = cached_score_company(
             company_id,
             st.session_state.user_id,
-            st.session_state.data_version,
+            company_version(company_id),
         )
     except Exception as e:
         st.error(f"Could not compute scorecard: {e}")
@@ -784,8 +840,9 @@ def render_scorecard_tab(company_id: str):
 
 def render_pipeline_tab(company_id: str):
     """Pipeline stage history for one company."""
-    history = db.get_pipeline_history(company_id)
-    company = db.get_company(company_id)
+    v = company_version(company_id)
+    history = cached_pipeline_history(company_id, v)
+    company = cached_get_company(company_id, v)
 
     st.markdown(f"### Pipeline — {company['name'] if company else ''}")
     st.markdown(
@@ -818,6 +875,7 @@ def render_pipeline_tab(company_id: str):
                 )
                 # Update current stage on company row
                 db.update_company_stage(company_id, stage)
+                bump_company(company_id)  # invalidate this company's caches
                 st.rerun()
 
     st.divider()
@@ -896,7 +954,8 @@ def main():
         st.info("Select a company from the sidebar to view its scorecard.")
         return
 
-    company = db.get_company(company_id)
+    # Cached header read — was the single biggest uncached call (every rerun).
+    company = cached_get_company(company_id, company_version(company_id))
     company_name = company["name"] if company else "Unknown"
 
     st.markdown(f"# {company_name}")
@@ -923,6 +982,12 @@ def main():
 
     with tab_tables:
         render_table_browser()
+
+    # Live perf readout — how long this rerun took end-to-end.
+    # Helps us see the impact of caching changes without external profiling.
+    elapsed_ms = (time.perf_counter() - _RENDER_START) * 1000
+    with st.sidebar:
+        st.caption(f"⚡ render: {elapsed_ms:.0f} ms")
 
 
 if __name__ == "__main__":
