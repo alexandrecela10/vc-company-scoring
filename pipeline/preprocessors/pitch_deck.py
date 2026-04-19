@@ -47,7 +47,7 @@ def _normalise_whitespace(text: str) -> str:
 class PitchDeckPreprocessor:
     """Turn a PDF pitch deck into a list of per-slide Chunks."""
 
-    source_type = "pitch_deck"
+    source_type = "pitchdeck"  # matches source_document.source_type enum in schema.sql
 
     # Pages shorter than this (after whitespace normalisation) are skipped.
     # Chosen empirically: title slides, section separators, and page-number

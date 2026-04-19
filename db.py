@@ -689,3 +689,196 @@ def get_table_rows(table_name: str, limit: int = 200) -> List[Dict]:
         raise ValueError(f"Table '{table_name}' is not in the allowed list.")
     # Table name is safe — whitelisted above, so f-string is fine here
     return _fetchall(f"SELECT * FROM {table_name} LIMIT %s", (limit,))
+
+
+# ---------------------------------------------------------------------------
+# Phase 2a — extractor pipeline helpers
+# ---------------------------------------------------------------------------
+# Thin DB wrappers used by the extractor orchestrators (pipeline/extractors/*).
+# Kept here rather than scattered across extractor modules so SQL lives in one
+# place and we can swap Supabase for anything else later without touching the
+# pipeline code.
+# ---------------------------------------------------------------------------
+
+def get_extractor_by_name(name: str, version: str = "1.0") -> Optional[Dict]:
+    """Return the extractor registry row by (name, version), or None."""
+    return _fetchone(
+        "SELECT * FROM extractor WHERE name = %s AND version = %s",
+        (name, version),
+    )
+
+
+def get_metric_ids_by_code(codes: List[str]) -> Dict[str, str]:
+    """Return {code: metric_id} for a list of metric.code values.
+
+    Metrics with NULL code (legacy) or unknown codes are simply omitted
+    from the result -- callers handle missing keys as "not wired up yet".
+    """
+    if not codes:
+        return {}
+    rows = _fetchall(
+        "SELECT id, code FROM metric WHERE code = ANY(%s)",
+        (codes,),
+    )
+    return {r["code"]: str(r["id"]) for r in rows}
+
+
+def get_or_create_source_document(
+    content_hash: str,
+    source_type: str,
+    source_subtype: Optional[str],
+    origin: str,
+    origin_path: Optional[str] = None,
+    origin_url: Optional[str] = None,
+    mime_type: Optional[str] = None,
+    size_bytes: Optional[int] = None,
+    ingested_by: Optional[str] = None,
+    notes: Optional[str] = None,
+) -> Dict:
+    """Idempotent upsert keyed by content_hash.
+
+    Returns the row (new or existing) with a `_created` bool indicating
+    whether we inserted a new row.
+    """
+    # ON CONFLICT DO UPDATE SET id = id returns the existing row; combined
+    # with xmax=0 we can tell if the row was newly created on this call.
+    row = _execute(
+        """
+        INSERT INTO source_document (
+            content_hash, source_type, source_subtype, origin,
+            origin_path, origin_url, mime_type, size_bytes, ingested_by, notes
+        )
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT (content_hash) DO UPDATE SET content_hash = EXCLUDED.content_hash
+        RETURNING *, (xmax = 0) AS _created
+        """,
+        (
+            content_hash, source_type, source_subtype, origin,
+            origin_path, origin_url, mime_type, size_bytes, ingested_by, notes,
+        ),
+    )
+    return row or {}
+
+
+def insert_source_chunks(
+    source_document_id: str,
+    chunks: List[Dict],
+) -> Dict[str, str]:
+    """Bulk-insert chunks; return {locator: chunk_id}.
+
+    Each `chunks` item must have keys: text, locator, ordinal, page (optional).
+    Uses ON CONFLICT on (source_document_id, chunk_idx) so re-running is a no-op.
+    """
+    if not chunks:
+        return {}
+    # execute_values is the psycopg2 idiom for bulk insert (one round-trip).
+    # Build the tuple list explicitly so we can map locator -> chunk_idx.
+    values = [
+        (source_document_id, c["ordinal"], c.get("page"), c["text"])
+        for c in chunks
+    ]
+    with get_conn() as conn, conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO source_chunk (source_document_id, chunk_idx, page, text)
+            VALUES %s
+            ON CONFLICT (source_document_id, chunk_idx) DO UPDATE SET text = EXCLUDED.text
+            RETURNING id, chunk_idx
+            """,
+            values,
+        )
+        rows = cur.fetchall()
+
+    # Map chunk_idx -> locator using the input ordinals; produce {locator: chunk_id}.
+    idx_to_locator = {c["ordinal"]: c["locator"] for c in chunks}
+    return {idx_to_locator[r["chunk_idx"]]: str(r["id"]) for r in rows}
+
+
+def start_extraction_run(
+    extractor_id: str,
+    source_document_id: Optional[str],
+    company_id: Optional[str],
+) -> str:
+    """Create an extraction_run row in `running` state, return its id."""
+    row = _execute(
+        """
+        INSERT INTO extraction_run
+            (extractor_id, source_document_id, company_id, status)
+        VALUES (%s, %s, %s, 'running')
+        RETURNING id
+        """,
+        (extractor_id, source_document_id, company_id),
+    )
+    return str(row["id"]) if row else ""
+
+
+def finish_extraction_run(
+    run_id: str,
+    status: str,
+    observations_count: int = 0,
+    error_message: Optional[str] = None,
+    cost_usd: Optional[float] = None,
+) -> None:
+    """Close an extraction_run: set finished_at, status, counts, cost."""
+    _execute(
+        """
+        UPDATE extraction_run
+           SET finished_at        = NOW(),
+               status             = %s,
+               observations_count = %s,
+               error_message      = %s,
+               cost_usd           = %s
+         WHERE id = %s
+        """,
+        (status, observations_count, error_message, cost_usd, run_id),
+    )
+
+
+def insert_metric_observations(
+    run_id: str,
+    company_id: str,
+    source_document_id: Optional[str],
+    rows: List[Dict],
+) -> int:
+    """Bulk-insert metric_observation rows. Returns rows-inserted count.
+
+    Each row dict must have: metric_id, normalized_value, raw_value (optional),
+    evidence_text (optional), source_chunk_id (optional), confidence (optional).
+
+    UNIQUE(extraction_run_id, company_id, metric_id) guarantees idempotency --
+    re-running the same extractor on the same inputs is a no-op.
+    """
+    if not rows:
+        return 0
+    values = [
+        (
+            run_id,
+            company_id,
+            r["metric_id"],
+            r.get("raw_value"),
+            r["normalized_value"],
+            source_document_id,
+            r.get("source_chunk_id"),
+            r.get("evidence_text"),
+            r.get("confidence", 1.0),
+        )
+        for r in rows
+    ]
+    with get_conn() as conn, conn.cursor() as cur:
+        psycopg2.extras.execute_values(
+            cur,
+            """
+            INSERT INTO metric_observation (
+                extraction_run_id, company_id, metric_id,
+                raw_value, normalized_value,
+                source_document_id, source_chunk_id,
+                evidence_text, confidence
+            )
+            VALUES %s
+            ON CONFLICT (extraction_run_id, company_id, metric_id) DO NOTHING
+            RETURNING id
+            """,
+            values,
+        )
+        return len(cur.fetchall())

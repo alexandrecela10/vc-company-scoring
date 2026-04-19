@@ -456,5 +456,8 @@ INSERT INTO extractor (id, name, version, supported_source_types, description) V
         'Analyst manually set a value via the UI. Always wins the resolver (highest source priority).'),
     ('55555555-0000-0000-0000-000000000003',
         'alpha_scout_v1', '1.0', '{web_page}',
-        'Alpha Scout discovery pipeline. Produces observations for Employee Count, Funding Stage, Founding Year based on Tavily + Gemini enrichment, grounded against trusted MENA / global sources.')
+        'Alpha Scout discovery pipeline. Produces observations for Employee Count, Funding Stage, Founding Year based on Tavily + Gemini enrichment, grounded against trusted MENA / global sources.'),
+    ('55555555-0000-0000-0000-000000000004',
+        'pitchdeck_v1', '1.0', '{pitchdeck}',
+        'Pitch-deck extractor (Phase 2a). Runs a deterministic rule engine (regex + enum_map) against per-slide chunks, with an LLM fallback for missing metrics. Provider-agnostic: defaults to Gemini Flash but any LLMProvider works.')
 ON CONFLICT (name, version) DO NOTHING;

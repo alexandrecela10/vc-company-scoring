@@ -48,7 +48,7 @@ SOURCE_PRIORITY: Dict[str, int] = {
     "analyst_override":         1,
     "founder_interview":        2,   # future: extractors/founder_interview_v1
     "meeting_note_md_v1":       2,   # Phase 2
-    "pitchdeck_gemini_v1":      3,   # Phase 2
+    "pitchdeck_v1":             3,   # Phase 2a
     "crunchbase":               4,   # future
     "sec_filing":               4,   # future
     "linkedin":                 5,   # future
