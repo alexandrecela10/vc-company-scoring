@@ -391,7 +391,78 @@ def render_overall_score(sc: CompanyScorecard):
             st.markdown("*Not computable — missing must-have data*")
 
 
-def render_metric_type_section(mts: MetricTypeScore):
+def render_provenance_expander(company_id: str, mts: MetricTypeScore):
+    """
+    Phase 1 provenance panel: for each metric in this dimension, show the
+    full chain: extractor → extraction run → observation → source document.
+
+    Rationale (ARCHITECTURE.md §6):
+      Every metric value must be auditable down to the exact observation
+      that produced it. Analysts should be able to answer "where did this
+      number come from?" in one click — no LLM call, no spelunking in the
+      DB. We query db.get_provenance_chain once per metric and render a
+      compact table.
+
+    Kept inside an st.expander so it doesn't clutter the default view —
+    shown only when the analyst asks for it.
+    """
+    with st.expander("🔗 Provenance & sources", expanded=False):
+        rows = []
+        for ms in mts.metric_scores:
+            chain = db.get_provenance_chain(company_id, ms.metric_id)
+            if not chain:
+                continue
+
+            # Two display modes depending on whether this is an analyst
+            # override (no observation) or a derived observation.
+            if chain["override"]:
+                extractor_display = "🔒 analyst_override"
+                source_display    = "analyst note"
+                run_time          = chain["cmv_captured_at"]
+            else:
+                extractor_display = (
+                    f"{chain['extractor_name']} v{chain['extractor_version']}"
+                    if chain["extractor_name"] else "—"
+                )
+                # Prefer a real source doc when we have one; fall back to the
+                # evidence URL (Phase 2+ will populate source_document_id).
+                if chain["source_origin_path"]:
+                    source_display = f"📄 {chain['source_origin_path']}"
+                elif chain["observation_evidence_url"]:
+                    source_display = chain["observation_evidence_url"]
+                else:
+                    source_display = "—"
+                run_time = chain["run_started_at"] or chain["observation_captured_at"]
+
+            rows.append({
+                "Metric":      ms.metric_name,
+                "Value":       ms.value_raw or "—",
+                "Extractor":   extractor_display,
+                "When":        run_time.strftime("%Y-%m-%d %H:%M") if run_time else "—",
+                "Confidence":  f"{ms.confidence:.0%}",
+                "Source":      source_display,
+                "Evidence":    (chain["observation_evidence_text"]
+                                or chain["override_reason"]
+                                or "—")[:200],
+            })
+
+        if not rows:
+            st.caption("No provenance data yet — run the Phase 1 backfill.")
+            return
+
+        df = pd.DataFrame(rows)
+        st.dataframe(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Source":   st.column_config.TextColumn(width="medium"),
+                "Evidence": st.column_config.TextColumn(width="large"),
+            },
+        )
+
+
+def render_metric_type_section(company_id: str, mts: MetricTypeScore):
     """Render one metric type block: score bar + child metrics table."""
     # Header row
     badge_html = score_badge(mts.type_score)
@@ -459,6 +530,10 @@ def render_metric_type_section(mts: MetricTypeScore):
             ),
         },
     )
+
+    # Phase 1 provenance: one expander per dimension. Hidden by default so
+    # the scorecard stays tight; opens to reveal extractor + run + source.
+    render_provenance_expander(company_id, mts)
 
 
 def render_market_agent(company_id: str):
@@ -855,13 +930,13 @@ def render_scorecard_tab(company_id: str):
 
     for mts in must_haves:
         with st.container():
-            render_metric_type_section(mts)
+            render_metric_type_section(company_id, mts)
             st.markdown("<div style='margin-bottom:16px'></div>", unsafe_allow_html=True)
 
     if nice_to_haves:
         with st.expander("📊 Nice-to-have dimensions", expanded=False):
             for mts in nice_to_haves:
-                render_metric_type_section(mts)
+                render_metric_type_section(company_id, mts)
                 st.markdown("<div style='margin-bottom:8px'></div>", unsafe_allow_html=True)
 
     st.divider()

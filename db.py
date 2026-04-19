@@ -503,6 +503,68 @@ def get_metric_by_id(metric_id: str) -> Optional[Dict]:
 
 
 # ---------------------------------------------------------------------------
+# Phase 1 — Provenance chain
+# ---------------------------------------------------------------------------
+
+def get_provenance_chain(company_id: str, metric_id: str) -> Optional[Dict]:
+    """
+    Walk the full provenance chain for a (company, metric) pair:
+        company_metric_value
+          → metric_observation  (winning_observation_id)
+             → extraction_run   (extraction_run_id)
+                → extractor     (extractor_id)
+             → source_document  (optional)
+
+    Returns a dict with the joined columns, or None if the row doesn't exist.
+    When override=TRUE, `observation_*` fields will be NULL because the
+    analyst's hand-set value is the winner, not an observation.
+
+    Used by the UI provenance expander to answer "where did this value
+    come from?" in one query.
+    """
+    return _fetchone("""
+        SELECT
+            cmv.value                  AS cmv_value,
+            cmv.override               AS override,
+            cmv.override_reason        AS override_reason,
+            cmv.captured_at            AS cmv_captured_at,
+            cmv.captured_by            AS cmv_captured_by,
+            cmv.confidence             AS cmv_confidence,
+
+            o.id                       AS observation_id,
+            o.normalized_value         AS observation_value,
+            o.raw_value                AS observation_raw_value,
+            o.evidence_text            AS observation_evidence_text,
+            o.evidence_url             AS observation_evidence_url,
+            o.captured_at              AS observation_captured_at,
+            o.confidence               AS observation_confidence,
+
+            r.id                       AS extraction_run_id,
+            r.started_at               AS run_started_at,
+            r.status                   AS run_status,
+
+            e.name                     AS extractor_name,
+            e.version                  AS extractor_version,
+            e.description              AS extractor_description,
+
+            sd.id                      AS source_document_id,
+            sd.source_type             AS source_type,
+            sd.origin                  AS source_origin,
+            sd.origin_path             AS source_origin_path,
+            sd.origin_url              AS source_origin_url,
+            sd.ingested_at             AS source_ingested_at
+        FROM company_metric_value cmv
+        LEFT JOIN metric_observation o ON o.id = cmv.winning_observation_id
+        LEFT JOIN extraction_run    r ON r.id = o.extraction_run_id
+        LEFT JOIN extractor         e ON e.id = r.extractor_id
+        LEFT JOIN source_document   sd ON sd.id = o.source_document_id
+        WHERE cmv.company_id = %s
+          AND cmv.metric_id  = %s
+          AND cmv.is_latest  = TRUE
+    """, (company_id, metric_id))
+
+
+# ---------------------------------------------------------------------------
 # News cache — populated on-demand by company_intel.fetch_news()
 # ---------------------------------------------------------------------------
 
