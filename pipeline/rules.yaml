@@ -1,0 +1,240 @@
+# =====================================================================
+# rules.yaml  --  per-metric extraction configuration
+# =====================================================================
+# This is the SINGLE SOURCE OF TRUTH for how each metric is extracted
+# from a text chunk. Adding/tuning a metric = editing this file.
+# No Python changes needed for 95% of metric work.
+#
+# How the engine uses it:
+#   1. For each chunk, for each metric in this file, try each `method`
+#      in order.
+#   2. The FIRST method that produces a valid observation wins for that
+#      (chunk, metric) pair.
+#   3. Observations across chunks are later reconciled by value_resolver.
+#
+# The top-level key MUST equal `metric.code` in the database. If the key
+# doesn't exist in the DB, the engine logs a warning and skips.
+#
+# ---------------------------------------------------------------------
+# Method types:
+#   regex     -- Python regex with named capture groups. Engine extracts
+#                capture groups, then normalises (see `normalise` block).
+#   enum_map  -- Keyword -> value map. First keyword found in the chunk
+#                (case-insensitive) wins.
+#   llm       -- Retrieval-augmented LLM call. Engine retrieves top-K
+#                chunks by keyword overlap, sends them to Gemini with a
+#                strict prompt, and REQUIRES a verbatim quote that is a
+#                substring of the chunk. No quote -> observation rejected.
+#
+# Confidence calibration (baseline, not gospel):
+#   regex match with clean capture: 0.85 - 0.95
+#   enum_map exact keyword:         0.90 - 0.95
+#   llm with quote verified:        0.65 - 0.80
+#   llm without quote:              REJECTED (no row written)
+# ---------------------------------------------------------------------
+
+# =====================================================================
+# mrr  --  Monthly Recurring Revenue (USD)
+# =====================================================================
+# A decimal number of USD. "$12k MRR" -> 12000, "MRR: $1.2M" -> 1200000.
+# We intentionally do NOT match ARR here (ARR != MRR; deriving MRR=ARR/12
+# is a separate derivation we'll add in Phase 2b).
+mrr:
+  value_type: number
+  unit: usd
+  # Sanity range so a typo like "$1,200,000,000,000" doesn't persist.
+  validate:
+    min: 0
+    max: 10_000_000_000  # $10B MRR = larger than most public co's; safe ceiling
+  methods:
+    # ----- Method 1: regex (high confidence) ------------------------
+    # Two patterns cover the common phrasings. Both use named groups
+    # `amount` and `unit` which the engine's number normaliser consumes.
+    #
+    # Pattern A -- "$12k MRR", "$1.2M monthly recurring revenue"
+    # Pattern B -- "MRR of $12k", "MRR: 1.2M", "monthly recurring revenue 1.2M"
+    - method: regex
+      confidence: 0.90
+      patterns:
+        - '\$\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\s*(?:mrr|monthly\s+recurring\s+revenue)'
+        - '(?:mrr|monthly\s+recurring\s+revenue)[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?'
+      # After regex, normalise the amount: parse number, apply unit multiplier.
+      normalise:
+        kind: number_with_unit
+        unit_group: unit      # which named group holds the unit
+        amount_group: amount  # which named group holds the number
+        units:
+          k: 1_000
+          m: 1_000_000
+          mm: 1_000_000
+          million: 1_000_000
+          b: 1_000_000_000
+          billion: 1_000_000_000
+          # null/missing unit -> multiplier 1 (handled by engine default)
+
+    # ----- Method 2: LLM fallback (lower confidence) ----------------
+    # Only runs if regex returned nothing for this metric.
+    # The engine retrieves the top-N chunks by keyword overlap with
+    # `retrieval_query` and sends them to Gemini with a strict prompt.
+    - method: llm
+      confidence: 0.70
+      retrieval_query: "monthly recurring revenue MRR run rate subscription revenue"
+      max_chunks: 3
+      # Engine-side guardrails (enforced in llm_fallback.py, documented here):
+      #   - Output must contain a verbatim quote that is substring of a chunk
+      #   - Output must be a numeric USD value or "unknown"
+      #   - "unknown" -> no observation, no gap (LLM said it couldn't tell)
+
+# =====================================================================
+# employee_count  --  Team size (headcount)
+# =====================================================================
+# A whole number. "team of 35" -> 35, "45 employees" -> 45.
+# NOT the same as "users" or "customers" -- the engine only matches
+# people-specific keywords to avoid collisions.
+employee_count:
+  value_type: number
+  unit: people
+  validate:
+    min: 0
+    max: 500_000   # Amazon has ~1.5M, but a scorable VC target won't.
+  methods:
+    - method: regex
+      confidence: 0.88
+      patterns:
+        # "35 employees", "35 full-time employees"
+        - '(?P<amount>\d{1,6})\s+(?:full[-\s]?time\s+)?employees\b'
+        # "team of 35", "team size: 35", "headcount: 35"
+        - '(?:team\s+(?:of|size)|headcount)[:\s]+(?P<amount>\d{1,6})\b'
+        # "35-person team", "35 person company"
+        - '(?P<amount>\d{1,6})[-\s]person\s+(?:team|company|startup)'
+      normalise:
+        kind: integer
+        amount_group: amount
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "team employees headcount FTE staff size"
+      max_chunks: 3
+
+# =====================================================================
+# funding_stage  --  Latest funding round, mapped to a 1-5 score
+# =====================================================================
+# value_type is score_1_5, so the stored value is an integer 1-5.
+# This is a DERIVABLE score_1_5 (enum map), not a judgmental one.
+funding_stage:
+  value_type: score_1_5
+  methods:
+    # ----- Method 1: enum_map (highest confidence) ------------------
+    # Keys are lowercased before matching against the lowercased chunk.
+    # The FIRST key found (scanning left-to-right through the chunk)
+    # wins. Later mentions of a different stage are ignored.
+    #
+    # Note: "series a" etc. are multi-word -- the engine uses word-
+    # boundary matching so "series axolotl" won't trigger "series a".
+    - method: enum_map
+      confidence: 0.92
+      # Ordered from most-specific-first to avoid false positives:
+      # "pre-seed" must be checked before "seed" so that a "pre-seed"
+      # chunk doesn't match "seed" instead.
+      map:
+        "pre-seed":        1
+        "pre seed":        1
+        "preseed":         1
+        "seed stage":      2
+        "seed round":      2
+        "seed":            2
+        "series a":        3
+        "series-a":        3
+        "series b":        4
+        "series-b":        4
+        "series c":        5
+        "series-c":        5
+        "series d":        5
+        "series-d":        5
+        "series e":        5
+        "growth stage":    5
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "funding stage round raised investors seed series"
+      max_chunks: 3
+
+# =====================================================================
+# founding_year  --  Year the company was incorporated
+# =====================================================================
+# A 4-digit year. "Founded in 2019" -> 2019.
+founding_year:
+  value_type: number
+  unit: year
+  validate:
+    min: 1900   # pre-modern startups exist but are out of scope
+    max: 2030   # generous upper bound; guards against typos like 20199
+  methods:
+    - method: regex
+      confidence: 0.92
+      patterns:
+        # "founded in 2019", "founded 2019"
+        - '\bfounded\s+(?:in\s+)?(?P<amount>(?:19|20)\d{2})\b'
+        # "established 2019", "est. 2019"
+        - '\b(?:established|est\.?)\s+(?P<amount>(?:19|20)\d{2})\b'
+        # "incorporated in 2019"
+        - '\bincorporated\s+(?:in\s+)?(?P<amount>(?:19|20)\d{2})\b'
+        # Structured: "Founded: 2019", "Year founded: 2019"
+        - '(?:year\s+founded|founding\s+year|founded)[:\s]+(?P<amount>(?:19|20)\d{2})\b'
+      normalise:
+        kind: integer
+        amount_group: amount
+
+    - method: llm
+      confidence: 0.70
+      retrieval_query: "founded established incorporated year inception"
+      max_chunks: 3
+
+# =====================================================================
+# prior_successful_exit  --  Does any founder have a prior exit?
+# =====================================================================
+# Boolean (stored as "true"/"false"). Positive signal wins: if ANY
+# chunk contains a positive exit keyword, we emit true. Absence of
+# evidence is NOT evidence of absence -- we don't emit `false`
+# deterministically from a deck (that would be over-claiming).
+# If no positive signal is found, no observation is written and the
+# orchestrator may create a gap_action ("ask founders").
+prior_successful_exit:
+  value_type: boolean
+  methods:
+    # ----- Method 1: keyword scan (enum_map with only "true" values) -
+    # We abuse enum_map here: every keyword maps to "true". The engine
+    # treats the result as a boolean observation.
+    - method: enum_map
+      confidence: 0.80
+      # Each keyword requires the chunk to ALSO contain a founder-
+      # adjacency signal ("founder", "co-founder", "ceo", "previously").
+      # This is enforced by the engine when `require_context` is set.
+      require_context:
+        any_of:
+          - "founder"
+          - "co-founder"
+          - "cofounder"
+          - "ceo"
+          - "previously"
+          - "prior to"
+          - "before founding"
+      map:
+        "acquired by":           true
+        "sold to":               true
+        "successful exit":       true
+        "previously sold":       true
+        "ipo'd":                 true
+        "took public":           true
+        "led to acquisition":    true
+        "exited to":             true
+        "acqui-hired by":        true
+        "acquihired by":         true
+
+    # ----- Method 2: LLM fallback ------------------------------------
+    # Looks at founder-bio-like chunks. Must return true/false/unknown
+    # with a verbatim quote. "unknown" -> no observation (not a false).
+    - method: llm
+      confidence: 0.70
+      retrieval_query: "founder previously exit sold acquired IPO prior company"
+      max_chunks: 4
