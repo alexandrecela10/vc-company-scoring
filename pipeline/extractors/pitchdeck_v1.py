@@ -78,6 +78,7 @@ def run_pitchdeck_extraction(
     provider: Optional[LLMProvider] = None,
     use_llm_fallback: bool = True,
     dry_run: bool = False,
+    progress_cb: Optional[callable] = None,
 ) -> ExtractionResult:
     """Run the full pitchdeck_v1 pipeline for one uploaded deck.
 
@@ -100,6 +101,20 @@ def run_pitchdeck_extraction(
     result = ExtractionResult()
     rules = rules_path or DEFAULT_RULES_PATH
 
+    # Small helper so every stage transition is one line at the call sites.
+    # No-op when the caller didn't supply a progress_cb.
+    def _progress(msg: str) -> None:
+        logger.info(msg)
+        if progress_cb is not None:
+            try:
+                progress_cb(msg)
+            except Exception:
+                # Never let a UI callback break the pipeline -- swallow and
+                # log so a bad Streamlit callback can't abort extraction.
+                logger.exception("progress_cb raised; continuing")
+
+    _progress("Parsing PDF...")
+
     # --- Step 1-2: preprocess (may fail on corrupt PDFs) ------------------
     try:
         chunks = PitchDeckPreprocessor().preprocess(raw_bytes, origin_path or "<bytes>")
@@ -116,6 +131,8 @@ def run_pitchdeck_extraction(
         logger.info(result.error)
         return result
 
+    _progress(f"Parsed {len(chunks)} slides -- running deterministic extractors...")
+
     # --- Step 5-7: run extractors (pure, no DB) ---------------------------
     # Deterministic first -- cheap, no LLM tokens burned.
     engine = DeterministicEngine.from_yaml(rules)
@@ -126,15 +143,22 @@ def run_pitchdeck_extraction(
     extracted_codes = {o.metric_name for o in det_obs}
     missing = [c for c in configured_metrics if c not in extracted_codes]
 
+    _progress(
+        f"Deterministic: covered {len(extracted_codes)}/{len(configured_metrics)} "
+        f"metrics ({len(det_obs)} raw matches)"
+    )
+
     # LLM fallback (optional) -- only for metrics still missing.
     llm_obs: List[Observation] = []
     if use_llm_fallback and missing:
+        _progress(f"Calling LLM for {len(missing)} missing metrics: {', '.join(missing)}")
         if provider is None:
             # Lazy default so dry-runs without GEMINI_API_KEY still work.
             from pipeline.extractors.llm_provider import GeminiProvider
             provider = GeminiProvider()
         fallback = LLMFallback.from_yaml(rules, provider=provider)
         llm_obs = fallback.extract_missing(chunks, missing)
+        _progress(f"LLM fallback: recovered {len(llm_obs)}/{len(missing)} missing metrics")
 
     all_obs = det_obs + llm_obs
     result.observations = all_obs
@@ -143,7 +167,10 @@ def run_pitchdeck_extraction(
     result.missing_metrics = [c for c in configured_metrics if c not in hit_codes]
 
     if dry_run:
+        _progress(f"Dry-run complete: {len(all_obs)} observations (not saved)")
         return result
+
+    _progress("Writing Bronze + Silver rows to database...")
 
     # --- Step 3-4 + 8-10: persist to Bronze + Silver ---------------------
     try:
@@ -185,6 +212,8 @@ def run_pitchdeck_extraction(
         logger.exception("pitchdeck_v1 persistence failed")
         return result
 
+    _progress("Resolving Gold layer (canonical values)...")
+
     # --- Step 11: refresh Gold layer -------------------------------------
     # value_resolver walks every metric for this company and picks the winning
     # observation (new pitchdeck_v1 obs may outrank older seed values).
@@ -196,6 +225,7 @@ def run_pitchdeck_extraction(
         # persisted. Just log so we notice.
         logger.warning(f"value_resolver failed post-extraction: {e}")
 
+    _progress(f"Done. Persisted {len(all_obs)} observations; Gold refreshed.")
     return result
 
 

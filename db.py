@@ -700,6 +700,46 @@ def get_table_rows(table_name: str, limit: int = 200) -> List[Dict]:
 # pipeline code.
 # ---------------------------------------------------------------------------
 
+def create_company(name: str, **fields) -> Dict:
+    """Create a new company row. Used by the Upload UI when an analyst
+    uploads a deck for a company we don't have yet.
+
+    Only `name` is required -- every other column is nullable and can be
+    filled in later via the scorecard. We keep the write minimal so the
+    analyst isn't forced into a data-entry form just to ingest a deck.
+
+    Idempotency:
+      - `company.name` is UNIQUE, so re-calling with the same name returns
+        the existing row via ON CONFLICT DO NOTHING + a follow-up SELECT.
+
+    Returns the full row dict.
+    """
+    # Whitelist the columns we accept so callers can't inject arbitrary keys.
+    allowed = {"website", "linkedin_url", "industry", "country",
+               "source_type", "source_channel", "pipeline_stage"}
+    safe = {k: v for k, v in fields.items() if k in allowed and v is not None}
+
+    cols = ["name"] + list(safe.keys())
+    placeholders = ["%s"] * len(cols)
+    values = [name] + list(safe.values())
+
+    # ON CONFLICT on the UNIQUE(name) constraint: if the row already exists,
+    # DO NOTHING and the RETURNING will be empty. We then SELECT it.
+    row = _execute(
+        f"""
+        INSERT INTO company ({', '.join(cols)})
+        VALUES ({', '.join(placeholders)})
+        ON CONFLICT (name) DO NOTHING
+        RETURNING *
+        """,
+        tuple(values),
+    )
+    if row:
+        return row
+    # Conflict path: fetch the existing row.
+    return _fetchone("SELECT * FROM company WHERE name = %s", (name,))
+
+
 def get_all_company_aliases() -> List[Dict]:
     """Return every company_alias row. Used by the entity resolver to build
     an in-memory lookup at startup. ~6-2000 rows in practice -- trivial cost."""

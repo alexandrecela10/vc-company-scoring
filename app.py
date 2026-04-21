@@ -17,6 +17,7 @@ Table Browser tab:
   - Raw view of any of the 8 DB tables (for demo transparency)
 """
 
+import logging
 import streamlit as st
 import pandas as pd
 import math
@@ -28,6 +29,46 @@ import db
 import scorer
 import market_agent
 from scorer import CompanyScorecard, MetricTypeScore, MetricScore
+
+# --- Logging config ---------------------------------------------------------
+# Streamlit re-runs app.py from the top on EVERY user interaction (tab click,
+# button press, etc.). Without the sentinel guard below, we'd re-init logging
+# handlers on every rerun -- flooding pipeline.log with duplicate "session
+# started" messages and opening N file descriptors. Configure once per process.
+if not getattr(logging, "_scorer_configured", False):
+    _log_format = logging.Formatter(
+        "%(asctime)s [%(name)s] %(message)s", datefmt="%H:%M:%S"
+    )
+    _root = logging.getLogger()
+    _root.setLevel(logging.INFO)
+    # Wipe any handlers Streamlit installed so our format wins.
+    _root.handlers.clear()
+
+    _stream = logging.StreamHandler()
+    _stream.setFormatter(_log_format)
+    _root.addHandler(_stream)
+
+    _file = logging.FileHandler("pipeline.log", mode="a", encoding="utf-8")
+    _file.setFormatter(_log_format)
+    _root.addHandler(_file)
+
+    # Silence chatty libs -- we only care about OUR pipeline logs.
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("urllib3").setLevel(logging.WARNING)
+    logging.getLogger("pdfminer").setLevel(logging.WARNING)
+
+    # Turn DEBUG on just for our pipeline so reject reasons (LLM null value,
+    # canonicalisation fail, out-of-range, no retrieval hit) surface without
+    # flooding the rest of the log with framework noise.
+    logging.getLogger("pipeline").setLevel(logging.DEBUG)
+
+    logging.getLogger("app").info("=" * 60)
+    logging.getLogger("app").info("Streamlit process started -- logging to pipeline.log")
+    # Sentinel: module-level attribute on logging so it survives Streamlit's
+    # script reruns (each rerun re-imports our modules but logging keeps state).
+    logging.Logger._scorer_configured = True  # type: ignore[attr-defined]
+    logging._scorer_configured = True  # type: ignore[attr-defined]
 
 # Track render start so we can show a live perf number in the sidebar footer.
 # This is the single source of truth for "how long did this rerun take?"
@@ -48,6 +89,13 @@ st.set_page_config(
 # ---------------------------------------------------------------------------
 if "selected_company_id" not in st.session_state:
     st.session_state.selected_company_id = None
+# app_mode: 'browse' (per-company scorecard view) or 'upload' (standalone
+# pitch-deck ingestion workflow). The Upload mode is intentionally NOT tied
+# to a pre-selected company -- the entity resolver figures out the company
+# from the deck itself. Starting in 'upload' on a cold load gives the user
+# a clear entry point.
+if "app_mode" not in st.session_state:
+    st.session_state.app_mode = "browse"
 if "user_id" not in st.session_state:
     st.session_state.user_id = "house"
 if "show_weight_editor" not in st.session_state:
@@ -213,6 +261,20 @@ def render_sidebar():
         st.markdown("*Jasoor Ventures — Deal Sourcing*")
         st.divider()
 
+        # --- Global workflows (not tied to any company) --------------------
+        # Upload is its own surface because a new deck may belong to a NEW
+        # company we don't have yet -- the entity resolver decides, not the UI.
+        upload_label = "📤 Upload a pitch deck"
+        if st.session_state.app_mode == "upload":
+            upload_label = "◀ Back to companies"
+        if st.button(upload_label, use_container_width=True, key="sidebar.upload_toggle"):
+            st.session_state.app_mode = (
+                "browse" if st.session_state.app_mode == "upload" else "upload"
+            )
+            st.rerun()
+
+        st.divider()
+
         # Weight view toggle
         view = st.radio(
             "Weight view",
@@ -276,7 +338,11 @@ def render_sidebar():
                 help=f"Score: {sc.overall_score or 'Incomplete'}",
             )
             if clicked:
+                # Clicking a company implies we want the per-company view --
+                # even if we were in upload mode. This keeps the sidebar as
+                # the single source of navigation.
                 st.session_state.selected_company_id = sc.company_id
+                st.session_state.app_mode = "browse"
                 st.rerun()
 
             # Show score badge + issue indicators below button
@@ -1067,6 +1133,17 @@ def main():
     if st.session_state.show_weight_editor:
         render_weight_editor()
 
+    # --- Branch on app mode -------------------------------------------------
+    # Upload mode is a standalone workflow: no company pre-selected, no tabs,
+    # full width for the ingestion flow. Entity resolution happens inside.
+    if st.session_state.app_mode == "upload":
+        from ui_upload import render_upload_tab
+        render_upload_tab()
+        elapsed_ms = (time.perf_counter() - _RENDER_START) * 1000
+        with st.sidebar:
+            st.caption(f"⚡ render: {elapsed_ms:.0f} ms")
+        return
+
     company_id = st.session_state.selected_company_id
     if not company_id:
         st.info("Select a company from the sidebar to view its scorecard.")
@@ -1089,7 +1166,7 @@ def main():
     st.divider()
 
     tab_scorecard, tab_pipeline, tab_tables = st.tabs(
-        ["🏆 Scorecard", "📋 Pipeline", "🗃️ Table Browser"]
+        ["🏆 Scorecard", "📋 Pipeline", "️ Table Browser"]
     )
 
     with tab_scorecard:

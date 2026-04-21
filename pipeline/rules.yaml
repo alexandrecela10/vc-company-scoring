@@ -238,3 +238,238 @@ prior_successful_exit:
       confidence: 0.70
       retrieval_query: "founder previously exit sold acquired IPO prior company"
       max_chunks: 4
+
+# =====================================================================
+# arr  --  Annual Recurring Revenue (USD)
+# =====================================================================
+# A USD dollar figure. Grammar is almost identical to `mrr` but with the
+# "annual" keyword. Decks commonly report ARR on financial slides in
+# either inline form ("$2.4M ARR") or table form (ARR row with yearly
+# columns). Regex handles the inline case; LLM fallback handles tables
+# where it can quote the right cell and reject projection columns.
+arr:
+  value_type: number
+  unit: usd
+  validate:
+    min: 0
+    max: 100_000_000_000   # $100B ceiling; defends against "$52.0" being read as $52B
+  methods:
+    - method: regex
+      confidence: 0.90
+      patterns:
+        # "$2.4M ARR", "$185k annual recurring revenue"
+        - '\$\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\s*(?:arr|annual\s+recurring\s+revenue)\b'
+        # "ARR of $2.4M", "ARR: 2.4M", "annual recurring revenue 2.4M"
+        - '(?:arr|annual\s+recurring\s+revenue)[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\b'
+      normalise:
+        kind: number_with_unit
+        unit_group: unit
+        amount_group: amount
+        units:
+          k: 1_000
+          m: 1_000_000
+          mm: 1_000_000
+          million: 1_000_000
+          b: 1_000_000_000
+          billion: 1_000_000_000
+
+    # LLM fallback is the main path for TABLE-shaped financials. The prompt
+    # must force the model to pick the latest NON-projected column and to
+    # quote that exact cell verbatim — guardrail G2 rejects anything else.
+    - method: llm
+      confidence: 0.70
+      retrieval_query: "ARR annual recurring revenue run rate subscription revenue"
+      max_chunks: 4
+
+# =====================================================================
+# revenue  --  Annual Revenue (USD, latest actual)
+# =====================================================================
+# Separate from ARR because non-SaaS companies report revenue but not ARR.
+# Also used by scorers that want GAAP revenue rather than booking-based ARR.
+revenue:
+  value_type: number
+  unit: usd
+  validate:
+    min: 0
+    max: 1_000_000_000_000
+  methods:
+    - method: regex
+      confidence: 0.85
+      patterns:
+        # "$1.8M revenue", "$300k in revenue"
+        - '\$\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\s*(?:in\s+)?revenue\b'
+        # "revenue of $1.8M", "revenue: 1.8M"
+        - '\brevenue[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\b'
+      normalise:
+        kind: number_with_unit
+        unit_group: unit
+        amount_group: amount
+        units:
+          k: 1_000
+          m: 1_000_000
+          mm: 1_000_000
+          million: 1_000_000
+          b: 1_000_000_000
+          billion: 1_000_000_000
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "revenue sales top line total revenue"
+      max_chunks: 4
+
+# =====================================================================
+# gross_margin  --  Gross Margin percentage (0-100)
+# =====================================================================
+# Stored as a plain number (e.g. "71" for 71%), NOT a ratio. validate.max
+# of 100 also catches typos like "710%".
+gross_margin:
+  value_type: number
+  unit: percent
+  validate:
+    min: -100            # negative GM happens early-stage
+    max: 100
+  methods:
+    - method: regex
+      confidence: 0.88
+      patterns:
+        # "gross margin 71%", "gross margin: 71%", "GM 71%"
+        - '\b(?:gross\s+margin|gm)[:\s]+(?P<amount>-?\d{1,3}(?:\.\d+)?)\s*%'
+        # "71% gross margin", "71% GM"
+        - '(?P<amount>-?\d{1,3}(?:\.\d+)?)\s*%\s+(?:gross\s+margin|gm)\b'
+      normalise:
+        kind: number_with_unit
+        amount_group: amount
+        units: {}         # no unit multiplier -- we capture a percent directly
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "gross margin gross profit margin GM"
+      max_chunks: 3
+
+# =====================================================================
+# burn_rate  --  Monthly cash burn (USD, absolute value)
+# =====================================================================
+# Stored as a POSITIVE number. Decks write burn with parentheses
+# ("(1.8)") or a minus sign; we just capture the magnitude. Scoring
+# logic can interpret "higher burn = worse" without caring about sign.
+burn_rate:
+  value_type: number
+  unit: usd
+  validate:
+    min: 0
+    max: 1_000_000_000
+  methods:
+    - method: regex
+      confidence: 0.85
+      patterns:
+        # "$1.8M burn", "$1.8M monthly burn", "$1.8M cash burn"
+        - '\$\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\s*(?:monthly\s+|cash\s+)?burn(?:\s+rate)?\b'
+        # "burn rate: $1.8M", "monthly burn 1.8M"
+        - '\b(?:monthly\s+)?burn(?:\s+rate)?[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\b'
+      normalise:
+        kind: number_with_unit
+        unit_group: unit
+        amount_group: amount
+        units:
+          k: 1_000
+          m: 1_000_000
+          mm: 1_000_000
+          million: 1_000_000
+          b: 1_000_000_000
+          billion: 1_000_000_000
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "burn rate monthly burn cash burn net burn"
+      max_chunks: 4
+
+# =====================================================================
+# customer_count  --  Number of paying customers
+# =====================================================================
+# Integer. Deliberately narrow keyword set — we do NOT match "users"
+# (freemium inflation) or "signups" (even worse). "Paying customers"
+# and "customers" only. Engine picks first regex hit per chunk.
+customer_count:
+  value_type: number
+  unit: count
+  validate:
+    min: 0
+    max: 10_000_000_000
+  methods:
+    - method: regex
+      confidence: 0.85
+      patterns:
+        # "410 paying customers", "1,200 customers"
+        - '(?P<amount>\d{1,3}(?:,\d{3})*|\d+)\s+(?:paying\s+)?customers\b'
+        # "customers: 410", "paying customers = 410"
+        - '\b(?:paying\s+)?customers[:=\s]+(?P<amount>\d{1,3}(?:,\d{3})*|\d+)\b'
+      normalise:
+        kind: integer
+        amount_group: amount
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "customers paying customers logos accounts"
+      max_chunks: 3
+
+# =====================================================================
+# runway_months  --  Runway (months of cash remaining)
+# =====================================================================
+# Integer months. "18 months of runway" -> 18. NOT ticker years.
+runway_months:
+  value_type: number
+  unit: months
+  validate:
+    min: 0
+    max: 120             # 10-year runway = implausible; guards against typos
+  methods:
+    - method: regex
+      confidence: 0.90
+      patterns:
+        # "18 months of runway", "18 months runway"
+        - '(?P<amount>\d{1,3})\s+months?\s+(?:of\s+)?runway\b'
+        # "runway: 18 months", "runway of 18 months"
+        - '\brunway[:\s]+(?:of\s+)?(?P<amount>\d{1,3})\s+months?\b'
+      normalise:
+        kind: integer
+        amount_group: amount
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "runway months of cash remaining cash position"
+      max_chunks: 3
+
+# =====================================================================
+# technical_cofounder  --  Is there a technical co-founder on the team?
+# =====================================================================
+# Boolean. Positive-only signal (same pattern as prior_successful_exit):
+# absence of evidence is NOT evidence of absence, so we never emit
+# `false` deterministically. require_context forces the enum_map to
+# only fire on chunks that mention founders/co-founders, preventing
+# "our CTO advisor" on a random slide from triggering.
+technical_cofounder:
+  value_type: boolean
+  methods:
+    - method: enum_map
+      confidence: 0.80
+      require_context:
+        any_of:
+          - "founder"
+          - "co-founder"
+          - "cofounder"
+          - "founding team"
+      map:
+        "technical co-founder":   true
+        "technical cofounder":    true
+        "cto & co-founder":       true
+        "cto and co-founder":     true
+        "cto, co-founder":        true
+        "co-founder & cto":       true
+        "co-founder and cto":     true
+        "co-founder, cto":        true
+        "engineer co-founder":    true
+
+    - method: llm
+      confidence: 0.65
+      retrieval_query: "CTO technical co-founder engineer founding team"
+      max_chunks: 4

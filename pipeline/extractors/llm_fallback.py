@@ -115,6 +115,7 @@ class LLMFallback:
         )
         if not top:
             # No chunk even mentions the topic keywords -> skip LLM call.
+            logger.debug(f"LLM skipped for {code!r}: no chunks matched retrieval keywords")
             return None
 
         # --- Step 2: call the provider ---
@@ -135,6 +136,7 @@ class LLMFallback:
 
         # Explicit null -> "LLM doesn't know", no observation (G4).
         if value is None or quote is None:
+            logger.debug(f"LLM returned null value/quote for {code!r} (model said 'don't know')")
             return None
 
         # --- Step 4: verify quote is verbatim substring of one chunk (G2) ---
@@ -148,8 +150,16 @@ class LLMFallback:
         # --- Step 5: type + range validation (G3) ---
         canonical = self._canonicalise(value, cfg)
         if canonical is None:
+            logger.debug(
+                f"LLM value {value!r} for {code!r} failed canonicalisation "
+                f"(expected type {cfg.get('value_type')!r})"
+            )
             return None
         if not self._within_range(canonical, cfg.get("validate")):
+            logger.debug(
+                f"LLM value {canonical!r} for {code!r} outside allowed range "
+                f"{cfg.get('validate')!r}"
+            )
             return None
 
         return Observation(
