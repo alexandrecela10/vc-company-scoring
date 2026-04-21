@@ -21,8 +21,9 @@ supabase>=2.0.0              # Supabase Python client (wraps Postgres + REST API
 pandas>=2.0.0                # Dataframes for table browser + exports
 
 # --- Document ingestion (Phase 2a) ---
-pdfplumber>=0.11.0           # Pure-Python PDF text extraction for pitch-deck preprocessor
+pdfplumber>=0.11.0           # PDF text extraction for pitch-deck preprocessor
 pyyaml>=6.0                  # Load rules.yaml (per-metric extraction config)
+rapidfuzz>=3.0.0             # Fuzzy string matching for entity resolver
 
 # --- Utilities ---
 python-dotenv>=1.0.0         # Load .env into os.environ

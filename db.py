@@ -700,6 +700,35 @@ def get_table_rows(table_name: str, limit: int = 200) -> List[Dict]:
 # pipeline code.
 # ---------------------------------------------------------------------------
 
+def get_all_company_aliases() -> List[Dict]:
+    """Return every company_alias row. Used by the entity resolver to build
+    an in-memory lookup at startup. ~6-2000 rows in practice -- trivial cost."""
+    return _fetchall(
+        "SELECT id, company_id, alias, alias_type FROM company_alias"
+    )
+
+
+def insert_company_alias(
+    company_id: str,
+    alias: str,
+    alias_type: str,
+) -> Optional[Dict]:
+    """Add an alias for a company. Idempotent on (company_id, alias, alias_type).
+
+    alias_type must be one of 'legal_name','domain','dba','former_name','acronym'
+    (enforced by CHECK constraint on the table).
+    """
+    return _execute(
+        """
+        INSERT INTO company_alias (company_id, alias, alias_type)
+        VALUES (%s, %s, %s)
+        ON CONFLICT (company_id, alias, alias_type) DO NOTHING
+        RETURNING *
+        """,
+        (company_id, alias, alias_type),
+    )
+
+
 def get_extractor_by_name(name: str, version: str = "1.0") -> Optional[Dict]:
     """Return the extractor registry row by (name, version), or None."""
     return _fetchone(

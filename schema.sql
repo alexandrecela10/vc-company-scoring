@@ -681,3 +681,44 @@ ALTER TABLE metric
 COMMENT ON COLUMN metric.code IS
     'Stable snake_case identifier used by rules.yaml and non-UI callers. '
     'Immutable by convention. NULL for legacy metrics without extraction rules.';
+
+
+-- =====================================================================
+-- Phase 2a migration: company_alias (entity resolution aliases)
+-- =====================================================================
+-- Why: when an analyst uploads a deck, the filename / first slide
+-- often contains a legal name, a DBA, a former name, or a domain that
+-- doesn't match company.name exactly. We need a place to store all
+-- the "other ways this company is spelled" so the entity resolver
+-- can match with high precision.
+--
+-- One company -> many aliases (one row per alias_type variant).
+-- alias_type enumerates the provenance of the alias so the UI can
+-- show "legal name", "domain", etc. without string-sniffing.
+-- =====================================================================
+CREATE TABLE IF NOT EXISTS company_alias (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    company_id  UUID NOT NULL REFERENCES company(id) ON DELETE CASCADE,
+    alias       TEXT NOT NULL,
+    alias_type  TEXT NOT NULL
+        CHECK (alias_type IN ('legal_name','domain','dba','former_name','acronym')),
+    created_at  TIMESTAMPTZ DEFAULT NOW(),
+    -- Same alias can exist once per (company, alias_type). Two different
+    -- companies can legitimately share an alias (e.g. "Rize" DBA) - we
+    -- let the resolver disambiguate by signals.
+    UNIQUE (company_id, alias, alias_type)
+);
+
+-- Functional index on lowercased alias. The resolver does all lookups
+-- case-insensitively, so this makes `WHERE LOWER(alias) = $1` fast.
+CREATE INDEX IF NOT EXISTS idx_company_alias_lower
+    ON company_alias (LOWER(alias));
+
+-- Secondary index to quickly fetch all aliases for a given company
+-- (used on the company detail page in the UI).
+CREATE INDEX IF NOT EXISTS idx_company_alias_company
+    ON company_alias (company_id);
+
+COMMENT ON TABLE company_alias IS
+    'Append-only aliases for a company (legal name, domain, DBA, former name, acronym). '
+    'Read by the entity resolver to match uploaded documents to the correct company_id.';
