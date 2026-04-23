@@ -46,6 +46,13 @@ mrr:
   validate:
     min: 0
     max: 10_000_000_000  # $10B MRR = larger than most public co's; safe ceiling
+  # Temporal contract (Phase 2c).
+  # MRR is an inherently monthly rate. as_of_date required so we know which
+  # month's MRR. Scenario defaults to `actual`; projections are rare in decks.
+  temporal:
+    requires: [as_of_date]
+    period_granularity: month
+    default_scenario_filter: actual
   methods:
     # ----- Method 1: regex (high confidence) ------------------------
     # Two patterns cover the common phrasings. Both use named groups
@@ -97,6 +104,13 @@ employee_count:
   validate:
     min: 0
     max: 500_000   # Amazon has ~1.5M, but a scorable VC target won't.
+  # Temporal contract: headcount is a point-in-time snapshot.
+  # Projections ("target: 95 FTEs by 2027") are common on growth slides --
+  # the resolver must filter those out unless explicitly asked.
+  temporal:
+    requires: [as_of_date]
+    period_granularity: point_in_time
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.88
@@ -123,6 +137,11 @@ employee_count:
 # This is a DERIVABLE score_1_5 (enum map), not a judgmental one.
 funding_stage:
   value_type: score_1_5
+  # Temporal contract: funding stage is a point-in-time label that only
+  # changes at the next round. Latest-known wins; no scenario concept.
+  temporal:
+    requires: []
+    period_granularity: point_in_time
   methods:
     # ----- Method 1: enum_map (highest confidence) ------------------
     # Keys are lowercased before matching against the lowercased chunk.
@@ -169,6 +188,11 @@ founding_year:
   validate:
     min: 1900   # pre-modern startups exist but are out of scope
     max: 2030   # generous upper bound; guards against typos like 20199
+  # Temporal contract: founding year is an IMMUTABLE historical fact.
+  # No as_of_date needed -- the value IS the date.
+  temporal:
+    requires: []
+    period_granularity: point_in_time
   methods:
     - method: regex
       confidence: 0.92
@@ -201,6 +225,11 @@ founding_year:
 # orchestrator may create a gap_action ("ask founders").
 prior_successful_exit:
   value_type: boolean
+  # Temporal contract: a founder's past-exit history is a point-in-time
+  # fact about a person. Once true, stays true.
+  temporal:
+    requires: []
+    period_granularity: point_in_time
   methods:
     # ----- Method 1: keyword scan (enum_map with only "true" values) -
     # We abuse enum_map here: every keyword maps to "true". The engine
@@ -253,6 +282,14 @@ arr:
   validate:
     min: 0
     max: 100_000_000_000   # $100B ceiling; defends against "$52.0" being read as $52B
+  # Temporal contract: ARR is the textbook ambiguous metric. A deck row
+  # like "2024 | 2025 | 2026E | 2027P | 2028P" can yield 5 observations;
+  # without scenario + as_of_date the resolver can't pick the right one.
+  # Both are REQUIRED -- an observation missing either is rejected.
+  temporal:
+    requires: [as_of_date, scenario]
+    period_granularity: year
+    default_scenario_filter: actual   # scorer ignores projections by default
   methods:
     - method: regex
       confidence: 0.90
@@ -292,6 +329,11 @@ revenue:
   validate:
     min: 0
     max: 1_000_000_000_000
+  # Temporal contract: same shape as ARR -- annual, scenario-classified.
+  temporal:
+    requires: [as_of_date, scenario]
+    period_granularity: year
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.85
@@ -328,6 +370,11 @@ gross_margin:
   validate:
     min: -100            # negative GM happens early-stage
     max: 100
+  # Temporal contract: % tied to a specific year (or TTM). Same rules as ARR.
+  temporal:
+    requires: [as_of_date, scenario]
+    period_granularity: year
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.88
@@ -358,6 +405,13 @@ burn_rate:
   validate:
     min: 0
     max: 1_000_000_000
+  # Temporal contract: burn is monthly by convention. Decks sometimes show
+  # annual burn in a financials table -- extractor should set granularity
+  # from context; if it can't, the observation is rejected.
+  temporal:
+    requires: [as_of_date, scenario]
+    period_granularity: month
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.85
@@ -395,6 +449,12 @@ customer_count:
   validate:
     min: 0
     max: 10_000_000_000
+  # Temporal contract: customer count is a point-in-time snapshot.
+  # Target-customer projections (e.g. "410 by 2028") must not win over today.
+  temporal:
+    requires: [as_of_date, scenario]
+    period_granularity: point_in_time
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.85
@@ -422,6 +482,12 @@ runway_months:
   validate:
     min: 0
     max: 120             # 10-year runway = implausible; guards against typos
+  # Temporal contract: runway is a snapshot from a specific balance-sheet date.
+  # "18 months of runway as of Q4 2024" is meaningfully different from today.
+  temporal:
+    requires: [as_of_date]
+    period_granularity: point_in_time
+    default_scenario_filter: actual
   methods:
     - method: regex
       confidence: 0.90
@@ -449,6 +515,11 @@ runway_months:
 # "our CTO advisor" on a random slide from triggering.
 technical_cofounder:
   value_type: boolean
+  # Temporal contract: boolean trait of the founding team at present.
+  # Point-in-time; no scenario.
+  temporal:
+    requires: []
+    period_granularity: point_in_time
   methods:
     - method: enum_map
       confidence: 0.80

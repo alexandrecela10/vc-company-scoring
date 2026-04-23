@@ -12,10 +12,16 @@ Resolver rules (in order):
   1. If an analyst has set override=TRUE on the company_metric_value row,
      that row wins unconditionally. No observation may overwrite it.
      (See ARCHITECTURE.md §8.)
-  2. Else the winning observation is picked by:
-       a. Lowest source priority rank (analyst_override=1, seed=7, …)
-       b. Most recent captured_at (newer wins within same priority)
-       c. Highest confidence (tie-breaker)
+  2. Else the winning observation is picked by this sort key (lower first):
+       a. Scenario rank (Phase 2c): actual=0, NULL=1, estimate=2,
+          projection=3, forecast=4. Keeps projected-year values from
+          beating a known current-year actual.
+       b. as_of_date DESC within the same scenario (newer claim wins).
+          NULL as_of_date sorts last so undated observations never
+          outrank dated ones.
+       c. Source priority rank (analyst_override=1, seed=7, …)
+       d. Most recent captured_at (newer run within same priority).
+       e. Highest confidence (tie-breaker).
   3. The canonical company_metric_value row is upserted with the winner's
      value + a pointer to winning_observation_id.
 
@@ -58,6 +64,25 @@ SOURCE_PRIORITY: Dict[str, int] = {
 }
 
 DEFAULT_PRIORITY = 6
+
+
+# Scenario preference ladder (Phase 2c).
+# NULL sits between `actual` and `estimate`: for timeless metrics
+# (founding_year, funding_stage, prior_successful_exit, technical_cofounder)
+# scenario is NULL by design and those observations should rank normally
+# among themselves. For money/count metrics, an `actual` beats undated
+# observations, which in turn beat estimates and projections.
+_SCENARIO_RANK: Dict[Optional[str], int] = {
+    "actual":     0,
+    None:         1,
+    "estimate":   2,
+    "projection": 3,
+    "forecast":   4,
+}
+
+# Sentinel used when as_of_date is NULL so NULL sorts LAST within the same
+# scenario (we negate the timestamp to get DESC order; -0 is the "oldest").
+_UNDATED_SORTABLE = 0.0
 
 
 def _priority_for(extractor_name: Optional[str]) -> int:
@@ -107,6 +132,9 @@ def resolve_and_store(company_id: str, metric_id: str) -> Optional[Dict]:
             o.confidence,
             o.captured_at,
             o.source_document_id,
+            o.scenario                AS scenario,
+            o.as_of_date              AS as_of_date,
+            o.period_label            AS period_label,
             e.name                    AS extractor_name
         FROM metric_observation o
         JOIN extraction_run r ON r.id = o.extraction_run_id
@@ -120,13 +148,29 @@ def resolve_and_store(company_id: str, metric_id: str) -> Optional[Dict]:
         )
         return existing_cmv  # may be None
 
-    # Step 3 — sort by (priority ASC, captured_at DESC, confidence DESC).
-    # Python's sorted() is stable, so equal priorities fall through to the
-    # next key.
+    # Step 3 — sort by the full ladder. Python's sorted() is stable, so
+    # equal values fall through to the next key.
+    #
+    # Primary: scenario rank (actual beats undated beats estimate beats
+    # projection). Most deck-extracted ambiguity is resolved right here.
+    #
+    # Secondary: as_of_date DESC. Within actuals, the most recent known
+    # year wins. NULL dates sort LAST via the _UNDATED_SORTABLE sentinel.
     def sort_key(row):
+        as_of = row.get("as_of_date")
+        # DATE objects from psycopg2 have .toordinal(); normalise to an int.
+        if as_of is not None:
+            try:
+                as_of_key = -as_of.toordinal()   # later date -> smaller (sorts first)
+            except AttributeError:
+                as_of_key = -_UNDATED_SORTABLE
+        else:
+            as_of_key = -_UNDATED_SORTABLE
+
         return (
+            _SCENARIO_RANK.get(row.get("scenario"), _SCENARIO_RANK[None]),
+            as_of_key,
             _priority_for(row["extractor_name"]),
-            # negate times & confidences so DESC sorts via ASC of negation
             -(row["captured_at"].timestamp() if row["captured_at"] else 0),
             -(float(row["confidence"] or 0)),
         )
@@ -136,7 +180,9 @@ def resolve_and_store(company_id: str, metric_id: str) -> Optional[Dict]:
     logger.info(
         f"  🏆 {company_id[:8]}/{metric_id[:8]} winner="
         f"{winner['extractor_name']} "
-        f"(rank={_priority_for(winner['extractor_name'])}, "
+        f"(scenario={winner.get('scenario') or '-'}, "
+        f"as_of={winner.get('as_of_date') or '-'}, "
+        f"rank={_priority_for(winner['extractor_name'])}, "
         f"value={winner['normalized_value']})"
     )
 

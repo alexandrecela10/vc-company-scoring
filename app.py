@@ -500,11 +500,27 @@ def render_provenance_expander(company_id: str, mts: MetricTypeScore):
                     source_display = "—"
                 run_time = chain["run_started_at"] or chain["observation_captured_at"]
 
+            # Phase 2c: show the CLAIM date + scenario alongside the
+            # extraction time. "When (run)" is when WE captured the data;
+            # "As of" is what date the fact actually describes. These are
+            # often different (e.g. a May-2026 extraction of a 2024 actual).
+            # Scenario appears as a tag only when it's NOT `actual`, so
+            # the default view stays clean.
+            as_of_date = chain.get("observation_as_of_date")
+            scenario   = chain.get("observation_scenario")
+            as_of_display = (
+                as_of_date.strftime("%Y-%m-%d") if as_of_date else "—"
+            )
+            scenario_tag = (
+                f" ⚠️ {scenario}" if scenario and scenario != "actual" else ""
+            )
+
             rows.append({
                 "Metric":      ms.metric_name,
-                "Value":       ms.value_raw or "—",
+                "Value":       (ms.value_raw or "—") + scenario_tag,
+                "As of":       as_of_display,
                 "Extractor":   extractor_display,
-                "When":        run_time.strftime("%Y-%m-%d %H:%M") if run_time else "—",
+                "When (run)":  run_time.strftime("%Y-%m-%d %H:%M") if run_time else "—",
                 "Confidence":  f"{ms.confidence:.0%}",
                 "Source":      source_display,
                 "Evidence":    (chain["observation_evidence_text"]

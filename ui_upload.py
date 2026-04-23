@@ -370,10 +370,15 @@ def _render_observations_table(observations: List) -> None:
                 "are image-heavy or text-light. You can still save the Bronze record.")
         return
 
+    # Phase 2c: surface the temporal contract in the preview so the analyst
+    # can catch bad period labels BEFORE saving (e.g. "oh, that ARR is the
+    # 2028P projection, not the 2024 actual -- reject and re-upload").
     rows = [
         {
             "Metric": o.metric_name,
             "Value": o.value,
+            "As of": o.as_of_date or "—",
+            "Scenario": o.scenario or "—",
             "Source": o.chunk_locator,
             "Confidence": f"{o.confidence:.2f}",
             "Method": o.method,

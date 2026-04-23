@@ -550,6 +550,12 @@ def get_provenance_chain(company_id: str, metric_id: str) -> Optional[Dict]:
             o.evidence_url             AS observation_evidence_url,
             o.captured_at              AS observation_captured_at,
             o.confidence               AS observation_confidence,
+            -- Phase 2c temporal contract: exposed so the Scorecard evidence
+            -- row can show "as of 2024-12-31 (projection)" tags.
+            o.scenario                 AS observation_scenario,
+            o.as_of_date               AS observation_as_of_date,
+            o.period_label             AS observation_period_label,
+            o.currency                 AS observation_currency,
 
             r.id                       AS extraction_run_id,
             r.started_at               AS run_started_at,
@@ -920,6 +926,8 @@ def insert_metric_observations(
     """
     if not rows:
         return 0
+    # Each row is now 14 columns: the original 9 + 5 temporal contract fields.
+    # All temporal fields are optional; missing keys default to NULL in DB.
     values = [
         (
             run_id,
@@ -931,6 +939,12 @@ def insert_metric_observations(
             r.get("source_chunk_id"),
             r.get("evidence_text"),
             r.get("confidence", 1.0),
+            # Phase 2c temporal contract -- NULL-safe for legacy callers.
+            r.get("as_of_date"),
+            r.get("period_granularity"),
+            r.get("scenario"),
+            r.get("currency"),
+            r.get("period_label"),
         )
         for r in rows
     ]
@@ -942,7 +956,9 @@ def insert_metric_observations(
                 extraction_run_id, company_id, metric_id,
                 raw_value, normalized_value,
                 source_document_id, source_chunk_id,
-                evidence_text, confidence
+                evidence_text, confidence,
+                as_of_date, period_granularity, scenario,
+                currency, period_label
             )
             VALUES %s
             ON CONFLICT (extraction_run_id, company_id, metric_id) DO NOTHING

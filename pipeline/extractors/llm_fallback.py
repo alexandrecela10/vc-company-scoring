@@ -48,6 +48,14 @@ _MIN_TOKEN_LEN = 3
 _DEFAULT_MAX_CHUNKS = 3
 
 
+# Period-label derivation lives in pipeline.extractors.temporal so the
+# deterministic engine can import the same helpers. Re-exported as a private
+# alias to preserve the existing test import (`_derive_scenario_and_date`).
+from pipeline.extractors.temporal import (  # noqa: E402 (placed after top imports on purpose)
+    derive_scenario_and_date as _derive_scenario_and_date,
+)
+
+
 class LLMFallback:
     """Reads rules.yaml, runs one LLM call per missing metric.
 
@@ -162,6 +170,37 @@ class LLMFallback:
             )
             return None
 
+        # --- Step 6: temporal contract (Phase 2c) -----------------------
+        # If rules.yaml declares `temporal.requires`, the LLM must have
+        # provided enough context (via period_label) for us to derive
+        # scenario + as_of_date. Missing required fields -> rejection.
+        # We derive deterministically from period_label so the LLM never
+        # picks the scenario itself (keeps judgment out of the model).
+        temporal_cfg = cfg.get("temporal") or {}
+        period_label = parsed.get("period_label")
+        if isinstance(period_label, str):
+            period_label = period_label.strip() or None
+        else:
+            period_label = None
+
+        scenario, as_of_date = _derive_scenario_and_date(
+            period_label, temporal_cfg.get("period_granularity"),
+        )
+
+        required: List[str] = list(temporal_cfg.get("requires") or [])
+        derived = {
+            "as_of_date": as_of_date,
+            "scenario": scenario,
+            "period_label": period_label,
+        }
+        missing_required = [f for f in required if not derived.get(f)]
+        if missing_required:
+            logger.debug(
+                f"LLM {code!r} missing required temporal fields "
+                f"{missing_required} (period_label={period_label!r}); rejected"
+            )
+            return None
+
         return Observation(
             metric_name=code,
             value=self._value_to_string(canonical, cfg.get("value_type")),
@@ -175,6 +214,11 @@ class LLMFallback:
                 "retrieved_chunks": [c.locator for c in top],
                 "raw_llm_value": value,
             },
+            as_of_date=as_of_date,
+            period_granularity=temporal_cfg.get("period_granularity"),
+            scenario=scenario,
+            currency="USD" if cfg.get("unit") == "usd" else None,
+            period_label=period_label,
         )
 
     # --- retrieval ------------------------------------------------------
@@ -216,10 +260,34 @@ class LLMFallback:
         value_type = cfg.get("value_type", "number")
         rubric = _VALUE_TYPE_RUBRIC.get(value_type, "")
         context = "\n\n".join(f"[{c.locator}] {c.text}" for c in chunks)
+
+        # Temporal block: only included when rules.yaml declares a non-empty
+        # `temporal.requires`. Keeps prompts for timeless metrics (founding_year,
+        # prior_successful_exit) short and focused.
+        temporal_cfg = cfg.get("temporal") or {}
+        if temporal_cfg.get("requires"):
+            temporal_block = _TEMPORAL_INSTRUCTIONS.format(
+                granularity=temporal_cfg.get("period_granularity", "year"),
+            )
+            json_keys = (
+                '  "value"          -- the extracted value (see rubric), or null.\n'
+                '  "evidence_quote" -- verbatim substring from a context chunk, or null.\n'
+                '  "period_label"   -- verbatim column header / date phrase from the source\n'
+                '                      that pinpoints WHEN this value applies, or null.'
+            )
+        else:
+            temporal_block = ""
+            json_keys = (
+                '  "value"          -- the extracted value (see rubric), or null.\n'
+                '  "evidence_quote" -- verbatim substring from a context chunk, or null.'
+            )
+
         return _PROMPT_TEMPLATE.format(
             metric=code,
             value_type=value_type,
             rubric=rubric,
+            temporal_block=temporal_block,
+            json_keys=json_keys,
             context=context,
         )
 
@@ -312,22 +380,33 @@ _PROMPT_TEMPLATE = """You are a strict evidence extractor for a VC company datab
 Metric: {metric}
 Value type: {value_type}
 {rubric}
-
+{temporal_block}
 Task: From the context chunks below, find the company's {metric}.
-Respond with JSON ONLY (no prose, no markdown fences) with EXACTLY two keys:
-  "value"          -- the extracted value (see rubric), or null if not stated.
-  "evidence_quote" -- a VERBATIM substring copied from one of the context chunks
-                      that proves the value, or null if value is null.
+Respond with JSON ONLY (no prose, no markdown fences) with these keys:
+{json_keys}
 
 Rules:
-- Do NOT paraphrase. Copy the quote character-for-character.
-- Do NOT guess. Absence of evidence = null, null.
-- If the context mentions a value but not for THIS company, return null, null.
+- Do NOT paraphrase. Copy any quote / label character-for-character from context.
+- Do NOT guess. Absence of evidence = all values null.
+- If the context mentions a value but not for THIS company, return nulls.
 
 Context:
 {context}
 
 JSON response:"""
+
+
+# Included in the prompt only when the metric declares `temporal.requires`.
+# The model never chooses `scenario` itself -- our code derives it from the
+# period_label suffix (E/P -> estimate/projection, plain year -> actual).
+_TEMPORAL_INSTRUCTIONS = """
+Temporal context: this metric is a {granularity}-granularity number. Decks
+often show multiple periods side-by-side (e.g. 2024 | 2025 | 2026E | 2027P).
+You MUST identify which period the value belongs to and return its verbatim
+label in `period_label` (e.g. "2024", "2026E", "Q4 2024", "Dec 2024").
+If you cannot pinpoint the period from the context, return all fields null.
+Prefer the LATEST actual (no suffix) over estimates (E) over projections (P).
+"""
 
 
 _VALUE_TYPE_RUBRIC = {

@@ -317,6 +317,14 @@ def _persist_observations(
             "evidence_text": obs.evidence_text,
             "source_chunk_id": chunk_id_map.get(obs.chunk_locator),
             "confidence": obs.confidence,
+            # Phase 2c: carry the temporal contract all the way to Silver.
+            # Deterministic observations leave these NULL; LLM observations
+            # populate them when rules.yaml declares `temporal.requires`.
+            "as_of_date": obs.as_of_date,
+            "period_granularity": obs.period_granularity,
+            "scenario": obs.scenario,
+            "currency": obs.currency,
+            "period_label": obs.period_label,
         })
 
     return db.insert_metric_observations(

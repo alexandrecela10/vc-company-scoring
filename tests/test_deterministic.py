@@ -27,43 +27,62 @@ class DeterministicEngineTests(unittest.TestCase):
         cls.engine = DeterministicEngine.from_yaml(RULES_PATH)
 
     # ---- mrr -----------------------------------------------------------
+    # NOTE: mrr declares `temporal.requires: [as_of_date]` in rules.yaml,
+    # so every MRR test MUST include a nearby period label (year, "Q4 2024",
+    # "Dec 2024") or the contract rejects the match. That's realistic: a
+    # deck that mentions "$1.2M MRR" without any date context is ambiguous
+    # and the extractor refuses to silently persist it.
 
     def test_mrr_with_unit_m(self):
-        obs = self.engine.extract([chunk("Our $1.2M MRR grew 30% YoY.")])
+        obs = self.engine.extract([chunk("Our $1.2M MRR in 2024 grew 30% YoY.")])
         mrr = [o for o in obs if o.metric_name == "mrr"]
         self.assertEqual(len(mrr), 1)
         self.assertEqual(mrr[0].value, "1200000")
         self.assertEqual(mrr[0].method, "regex")
         self.assertIn("1.2M MRR", mrr[0].evidence_text)
+        # Temporal enrichment should now be populated from "2024".
+        self.assertEqual(mrr[0].scenario, "actual")
+        self.assertEqual(mrr[0].as_of_date, "2024-12-31")
+        self.assertEqual(mrr[0].period_label, "2024")
 
     def test_mrr_with_unit_k(self):
-        obs = self.engine.extract([chunk("Reached $185k MRR in Q3.")])
+        obs = self.engine.extract([chunk("Reached $185k MRR in Q3 2024.")])
         mrr = [o for o in obs if o.metric_name == "mrr"]
         self.assertEqual(len(mrr), 1)
         self.assertEqual(mrr[0].value, "185000")
+        # "Q3 2024" -> end of Q3 = Sep 30.
+        self.assertEqual(mrr[0].as_of_date, "2024-09-30")
 
     def test_mrr_colon_form_no_unit(self):
-        obs = self.engine.extract([chunk("MRR: 185000 (stable)")])
+        obs = self.engine.extract([chunk("MRR: 185000 (Dec 2024, stable)")])
         mrr = [o for o in obs if o.metric_name == "mrr"]
         self.assertEqual(len(mrr), 1)
         self.assertEqual(mrr[0].value, "185000")
+        self.assertEqual(mrr[0].period_label, "Dec 2024")
+
+    def test_mrr_without_period_is_rejected(self):
+        # Contract enforcement: mrr requires as_of_date. No year -> reject.
+        obs = self.engine.extract([chunk("Our $1.2M MRR grew 30% YoY.")])
+        mrr = [o for o in obs if o.metric_name == "mrr"]
+        self.assertEqual(mrr, [])
 
     def test_mrr_out_of_range_discarded(self):
-        # $100B MRR > max validate 10B -> engine must discard
-        obs = self.engine.extract([chunk("We have $100B MRR, trust us.")])
+        # $100B MRR > max validate 10B -> engine must discard (before temporal).
+        obs = self.engine.extract([chunk("We have $100B MRR in 2024, trust us.")])
         mrr = [o for o in obs if o.metric_name == "mrr"]
         self.assertEqual(mrr, [])
 
     # ---- employee_count ------------------------------------------------
+    # Same contract: employee_count requires as_of_date.
 
     def test_employee_count_team_of(self):
-        obs = self.engine.extract([chunk("Team of 35 engineers shipping weekly.")])
+        obs = self.engine.extract([chunk("Team of 35 engineers shipping weekly in 2024.")])
         ec = [o for o in obs if o.metric_name == "employee_count"]
         self.assertEqual(len(ec), 1)
         self.assertEqual(ec[0].value, "35")
 
     def test_employee_count_fulltime(self):
-        obs = self.engine.extract([chunk("45 full-time employees across 3 offices.")])
+        obs = self.engine.extract([chunk("45 full-time employees across 3 offices (2024).")])
         ec = [o for o in obs if o.metric_name == "employee_count"]
         self.assertEqual(len(ec), 1)
         self.assertEqual(ec[0].value, "45")

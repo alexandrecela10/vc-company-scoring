@@ -11,7 +11,7 @@ This separation keeps extractors pure, deterministic, and unit-testable.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Literal, Protocol
+from typing import Any, Dict, List, Literal, Optional, Protocol
 
 # The five extraction methods. Kept as a Literal (not an enum) so rules.yaml
 # can use plain strings and mypy still checks them.
@@ -42,6 +42,18 @@ class Observation:
     # Free-form diagnostics (pattern_id, llm_prompt_hash, derived_from=[...]).
     # Stored on metric_observation.method_details JSONB for audit.
     method_details: Dict[str, Any] = field(default_factory=dict)
+
+    # --- temporal contract (Phase 2c) ---
+    # All optional -- legacy deterministic observations stay NULL-compatible.
+    # Resolver uses `scenario` + `as_of_date` to pick actuals over projections
+    # and newer actuals over older ones. rules.yaml `temporal.requires` can
+    # force the LLM path to populate these; if missing, the observation is
+    # rejected (prevents ambiguous facts from reaching the DB).
+    as_of_date: Optional[str] = None          # ISO "YYYY-MM-DD" that the CLAIM describes
+    period_granularity: Optional[str] = None  # point_in_time|month|quarter|year|trailing_12m
+    scenario: Optional[str] = None            # actual|estimate|projection|forecast
+    currency: Optional[str] = None            # ISO-4217 for money metrics
+    period_label: Optional[str] = None        # raw label from source, verbatim (e.g. "2026E")
 
 
 class Extractor(Protocol):

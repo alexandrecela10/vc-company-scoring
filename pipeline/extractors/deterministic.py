@@ -23,6 +23,10 @@ from typing import Any, Dict, List, Optional, Union
 import yaml
 
 from pipeline.extractors.base import Observation
+from pipeline.extractors.temporal import (
+    derive_scenario_and_date,
+    scan_nearby_period_label,
+)
 from pipeline.preprocessors.base import Chunk
 
 # Chars of surrounding text kept alongside the match, so the UI evidence
@@ -173,6 +177,20 @@ class DeterministicEngine:
             evidence = self._context_around(chunk.text, match.start(), match.end())
             assert evidence in chunk.text, "evidence must be substring of chunk.text"
 
+            # --- Temporal contract (Phase 2c) ---
+            # Scan a tight window around the value match for a year / quarter
+            # / month label. Covers inline phrasings like "$2.4M ARR in 2024"
+            # deterministically, without burning an LLM call.
+            temporal_cfg = cfg.get("temporal") or {}
+            scenario, as_of_date, period_label = self._derive_temporal(
+                chunk.text, match.start(), match.end()
+            )
+            if not self._temporal_contract_met(
+                temporal_cfg.get("requires"), scenario, as_of_date, period_label
+            ):
+                # Required fields missing -- skip this match, keep looking.
+                continue
+
             return Observation(
                 metric_name=code,
                 value=self._value_to_string(value, cfg.get("value_type")),
@@ -185,6 +203,11 @@ class DeterministicEngine:
                     "match": match.group(0),
                     "normalised": value,
                 },
+                as_of_date=as_of_date,
+                period_granularity=temporal_cfg.get("period_granularity"),
+                scenario=scenario,
+                currency="USD" if cfg.get("unit") == "usd" else None,
+                period_label=period_label,
             )
         return None
 
@@ -210,6 +233,19 @@ class DeterministicEngine:
         evidence = self._context_around(chunk.text, start, end)
         assert evidence in chunk.text, "evidence must be substring of chunk.text"
 
+        # Same temporal contract as regex. Most enum_map metrics are
+        # point_in_time booleans (funding_stage, prior_successful_exit,
+        # technical_cofounder) with `requires: []`, so the scan usually
+        # returns None and the observation accepts NULL temporals.
+        temporal_cfg = cfg.get("temporal") or {}
+        scenario, as_of_date, period_label = self._derive_temporal(
+            chunk.text, start, end
+        )
+        if not self._temporal_contract_met(
+            temporal_cfg.get("requires"), scenario, as_of_date, period_label
+        ):
+            return None
+
         return Observation(
             metric_name=code,
             value=self._value_to_string(value, cfg.get("value_type")),
@@ -218,7 +254,56 @@ class DeterministicEngine:
             method="enum_map",
             confidence=float(m["confidence"]),
             method_details={"keyword": matched, "pattern": pattern},
+            as_of_date=as_of_date,
+            period_granularity=temporal_cfg.get("period_granularity"),
+            scenario=scenario,
+            currency=None,  # enum_map values are never monetary today.
+            period_label=period_label,
         )
+
+    # --- temporal helpers (Phase 2c) -----------------------------------
+
+    @staticmethod
+    def _derive_temporal(
+        text: str, start: int, end: int
+    ) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """Scan around a match for a period label; return the 3-tuple.
+
+        Returns (scenario, as_of_date, period_label). All three are None
+        together -- if we didn't find a label we can't derive anything.
+        """
+        label = scan_nearby_period_label(text, start, end, window=60)
+        if not label:
+            return None, None, None
+        scenario, as_of_date = derive_scenario_and_date(label)
+        # If the label matched our scanner regex but NOT the parser (e.g. a
+        # malformed "FY24" that the scanner allowed through), don't keep a
+        # half-populated tuple. Treat as "no label found".
+        if scenario is None or as_of_date is None:
+            return None, None, None
+        return scenario, as_of_date, label
+
+    @staticmethod
+    def _temporal_contract_met(
+        required: Optional[List[str]],
+        scenario: Optional[str],
+        as_of_date: Optional[str],
+        period_label: Optional[str],
+    ) -> bool:
+        """True if all rules.yaml-required temporal fields are populated.
+
+        Mirrors the logic in llm_fallback -- by sharing the shape of the
+        requirement ({"as_of_date", "scenario", "period_label"}), both
+        extractors apply the contract identically.
+        """
+        if not required:
+            return True
+        derived = {
+            "as_of_date": as_of_date,
+            "scenario": scenario,
+            "period_label": period_label,
+        }
+        return all(derived.get(f) for f in required)
 
     # --- helpers --------------------------------------------------------
 
