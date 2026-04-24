@@ -112,6 +112,21 @@ class DeterministicEngineTests(unittest.TestCase):
         self.assertEqual(len(fs), 1)
         self.assertEqual(fs[0].value, "1")
 
+    def test_funding_stage_does_not_capture_nearby_year(self):
+        # Bug fix 2026-04-23: timeless metrics (requires=[]) must NEVER pick
+        # up an opportunistic year from the scan window. A deck saying
+        # "Series A close Q2 2026" should produce funding_stage=3 with NULL
+        # temporals -- not tag it as_of=Q2 2026.
+        obs = self.engine.extract([
+            chunk("We closed our Series A led by Accel in Q2 2026.")
+        ])
+        fs = [o for o in obs if o.metric_name == "funding_stage"]
+        self.assertEqual(len(fs), 1)
+        self.assertEqual(fs[0].value, "3")
+        self.assertIsNone(fs[0].as_of_date)
+        self.assertIsNone(fs[0].scenario)
+        self.assertIsNone(fs[0].period_label)
+
     # ---- prior_successful_exit (context-gated enum_map) ---------------
 
     def test_prior_exit_with_founder_context(self):

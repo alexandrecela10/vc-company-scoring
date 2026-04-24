@@ -18,6 +18,7 @@ for "latest actual" ordering.
 from __future__ import annotations
 
 import re
+from datetime import date
 from typing import Optional, Tuple
 
 # ---------------------------------------------------------------------------
@@ -85,7 +86,9 @@ def _suffix_to_scenario(suffix: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 def derive_scenario_and_date(
-    period_label: Optional[str], granularity: Optional[str] = None
+    period_label: Optional[str],
+    granularity: Optional[str] = None,
+    today: Optional[date] = None,
 ) -> Tuple[Optional[str], Optional[str]]:
     """Parse a period_label into (scenario, as_of_date ISO string).
 
@@ -93,37 +96,72 @@ def derive_scenario_and_date(
     decide whether to reject the observation (when rules.yaml declares
     `temporal.requires`) or accept it with NULL temporal fields.
 
+    Scenario rules:
+      - suffix 'E' -> estimate, 'P' -> projection, 'F' -> forecast (verbatim).
+      - No suffix + as_of_date <= today -> actual (the claim describes a
+        period that has already ended, so it's a recorded fact).
+      - No suffix + as_of_date >  today -> projection (the claim describes
+        a period in the future, so it can only be a forward-looking value).
+
+    `today` is injectable for testability; defaults to date.today().
     `granularity` is currently informational -- the date is always the
-    PERIOD-END, regardless. Kept in the signature so future callers can
-    pass a hint (e.g. "month" -> treat "2024" as Dec 2024 anyway, same
-    result) without a breaking change.
+    PERIOD-END, regardless.
     """
     if not period_label:
         return None, None
     label = period_label.strip()
 
+    scenario: Optional[str] = None
+    as_of_date: Optional[str] = None
+    suffix_was_explicit = False
+
     m = _YEAR_LABEL_RE.match(label)
     if m:
         year = int(m.group("year"))
-        return _suffix_to_scenario(m.group("suffix")), f"{year:04d}-12-31"
+        suffix = m.group("suffix")
+        scenario = _suffix_to_scenario(suffix)
+        as_of_date = f"{year:04d}-12-31"
+        suffix_was_explicit = bool(suffix)
+    else:
+        m = _QUARTER_LABEL_RE.match(label)
+        if m:
+            q = int(m.group("q"))
+            year_raw = m.group("year")
+            year = int(year_raw) if len(year_raw) == 4 else 2000 + int(year_raw)
+            mm, dd = _QUARTER_END_MD[q]
+            suffix = m.group("suffix")
+            scenario = _suffix_to_scenario(suffix)
+            as_of_date = f"{year:04d}-{mm:02d}-{dd:02d}"
+            suffix_was_explicit = bool(suffix)
+        else:
+            m = _MONTH_LABEL_RE.match(label)
+            if m:
+                mn = _MONTH_NAMES.get(m.group("month").lower())
+                if mn is not None:
+                    year = int(m.group("year"))
+                    dd = 28 if mn == 2 else (30 if mn in (4, 6, 9, 11) else 31)
+                    suffix = m.group("suffix")
+                    scenario = _suffix_to_scenario(suffix)
+                    as_of_date = f"{year:04d}-{mn:02d}-{dd:02d}"
+                    suffix_was_explicit = bool(suffix)
 
-    m = _QUARTER_LABEL_RE.match(label)
-    if m:
-        q = int(m.group("q"))
-        year_raw = m.group("year")
-        year = int(year_raw) if len(year_raw) == 4 else 2000 + int(year_raw)
-        mm, dd = _QUARTER_END_MD[q]
-        return _suffix_to_scenario(m.group("suffix")), f"{year:04d}-{mm:02d}-{dd:02d}"
+    if scenario is None or as_of_date is None:
+        return None, None
 
-    m = _MONTH_LABEL_RE.match(label)
-    if m:
-        mn = _MONTH_NAMES.get(m.group("month").lower())
-        if mn is not None:
-            year = int(m.group("year"))
-            dd = 28 if mn == 2 else (30 if mn in (4, 6, 9, 11) else 31)
-            return _suffix_to_scenario(m.group("suffix")), f"{year:04d}-{mn:02d}-{dd:02d}"
+    # Post-processing: the deck wrote "2028" without a suffix, but 2028
+    # hasn't happened yet -> it cannot be an actual. Downgrade to
+    # projection. Never touches explicit E/P/F (those are author-asserted).
+    if scenario == "actual" and not suffix_was_explicit:
+        ref = today or date.today()
+        try:
+            if date.fromisoformat(as_of_date) > ref:
+                scenario = "projection"
+        except ValueError:
+            # Defensive: should never happen since we build the ISO string
+            # ourselves, but if parsing fails we just trust the suffix logic.
+            pass
 
-    return None, None
+    return scenario, as_of_date
 
 
 def scan_nearby_period_label(

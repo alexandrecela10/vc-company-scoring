@@ -178,18 +178,25 @@ class DeterministicEngine:
             assert evidence in chunk.text, "evidence must be substring of chunk.text"
 
             # --- Temporal contract (Phase 2c) ---
-            # Scan a tight window around the value match for a year / quarter
-            # / month label. Covers inline phrasings like "$2.4M ARR in 2024"
-            # deterministically, without burning an LLM call.
+            # Scan only when rules.yaml declares temporal.requires for this
+            # metric. Timeless metrics (funding_stage, founding_year,
+            # prior_successful_exit, technical_cofounder) declare requires=[]
+            # -- for those, any nearby year is noise (e.g. a deck page that
+            # mentions "Series A" near "2026 ARR" shouldn't tag the stage
+            # with as_of=2026). We leave temporal fields NULL in that case.
             temporal_cfg = cfg.get("temporal") or {}
-            scenario, as_of_date, period_label = self._derive_temporal(
-                chunk.text, match.start(), match.end()
-            )
-            if not self._temporal_contract_met(
-                temporal_cfg.get("requires"), scenario, as_of_date, period_label
-            ):
-                # Required fields missing -- skip this match, keep looking.
-                continue
+            required = temporal_cfg.get("requires") or []
+            if required:
+                scenario, as_of_date, period_label = self._derive_temporal(
+                    chunk.text, match.start(), match.end()
+                )
+                if not self._temporal_contract_met(
+                    required, scenario, as_of_date, period_label
+                ):
+                    # Required fields missing -- skip this match, keep looking.
+                    continue
+            else:
+                scenario = as_of_date = period_label = None
 
             return Observation(
                 metric_name=code,
@@ -233,18 +240,24 @@ class DeterministicEngine:
         evidence = self._context_around(chunk.text, start, end)
         assert evidence in chunk.text, "evidence must be substring of chunk.text"
 
-        # Same temporal contract as regex. Most enum_map metrics are
-        # point_in_time booleans (funding_stage, prior_successful_exit,
-        # technical_cofounder) with `requires: []`, so the scan usually
-        # returns None and the observation accepts NULL temporals.
+        # Same gate as the regex path: only scan when rules.yaml declares
+        # temporal.requires. Most enum_map metrics are timeless booleans
+        # (funding_stage, prior_successful_exit, technical_cofounder) and
+        # should NEVER carry an opportunistic as_of_date -- a deck that
+        # says "Series A round in Q2 2026" shouldn't tag funding_stage=3
+        # with as_of=Q2 2026. We leave temporals NULL for those metrics.
         temporal_cfg = cfg.get("temporal") or {}
-        scenario, as_of_date, period_label = self._derive_temporal(
-            chunk.text, start, end
-        )
-        if not self._temporal_contract_met(
-            temporal_cfg.get("requires"), scenario, as_of_date, period_label
-        ):
-            return None
+        required = temporal_cfg.get("requires") or []
+        if required:
+            scenario, as_of_date, period_label = self._derive_temporal(
+                chunk.text, start, end
+            )
+            if not self._temporal_contract_met(
+                required, scenario, as_of_date, period_label
+            ):
+                return None
+        else:
+            scenario = as_of_date = period_label = None
 
         return Observation(
             metric_name=code,

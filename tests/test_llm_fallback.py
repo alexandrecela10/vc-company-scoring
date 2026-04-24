@@ -13,6 +13,8 @@ import unittest
 from pathlib import Path
 from typing import Any, Dict, Optional
 
+from datetime import date
+
 from pipeline.extractors.llm_fallback import (
     LLMFallback,
     _derive_scenario_and_date,
@@ -201,6 +203,43 @@ class TemporalDerivationTests(unittest.TestCase):
         self.assertEqual(_derive_scenario_and_date("recent", "year"), (None, None))
         self.assertEqual(_derive_scenario_and_date(None, "year"), (None, None))
         self.assertEqual(_derive_scenario_and_date("", "year"), (None, None))
+
+    # --- future-date downgrade (bug reported 2026-04-23) ----------------
+
+    def test_future_year_without_suffix_becomes_projection(self):
+        # "2028" with no E/P/F on a deck read in 2026 describes the future,
+        # so it CANNOT be an actual -- should auto-downgrade to projection.
+        self.assertEqual(
+            _derive_scenario_and_date("2028", "year", today=date(2026, 4, 23)),
+            ("projection", "2028-12-31"),
+        )
+
+    def test_future_quarter_without_suffix_becomes_projection(self):
+        # Same logic at quarter granularity (the employee_count=12 case).
+        self.assertEqual(
+            _derive_scenario_and_date("Q3 2027", "quarter", today=date(2026, 4, 23)),
+            ("projection", "2027-09-30"),
+        )
+
+    def test_past_year_without_suffix_stays_actual(self):
+        # "2024" on a 2026 deck is a recorded past fact -> stays actual.
+        self.assertEqual(
+            _derive_scenario_and_date("2024", "year", today=date(2026, 4, 23)),
+            ("actual", "2024-12-31"),
+        )
+
+    def test_explicit_suffix_beats_future_check(self):
+        # "2028P" is ALREADY labelled projection -- we trust the author,
+        # don't second-guess. (Symmetric: "2024P" is a retrospective
+        # projection statement; still projection.)
+        self.assertEqual(
+            _derive_scenario_and_date("2028P", "year", today=date(2026, 4, 23)),
+            ("projection", "2028-12-31"),
+        )
+        self.assertEqual(
+            _derive_scenario_and_date("2028E", "year", today=date(2026, 4, 23)),
+            ("estimate", "2028-12-31"),
+        )
 
 
 class TemporalContractEnforcementTests(unittest.TestCase):
