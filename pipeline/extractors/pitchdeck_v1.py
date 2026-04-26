@@ -32,8 +32,10 @@ from typing import List, Optional
 import db
 from pipeline.extractors.base import Observation
 from pipeline.extractors.deterministic import DeterministicEngine
+from pipeline.extractors.layout_patterns import extract_layout_observations
 from pipeline.extractors.llm_fallback import LLMFallback
 from pipeline.extractors.llm_provider import LLMProvider
+from pipeline.extractors.table_financials import extract_table_observations
 from pipeline.preprocessors.base import Chunk
 from pipeline.preprocessors.pitch_deck import PitchDeckPreprocessor, PreprocessingError
 
@@ -47,6 +49,25 @@ SOURCE_SUBTYPE = "pdf"
 
 # Default rules file. Callers can override for A/B testing alternative rules.
 DEFAULT_RULES_PATH = Path(__file__).resolve().parent.parent / "rules.yaml"
+
+
+def _dedupe_observations(observations: List[Observation]) -> List[Observation]:
+    """Keep first equivalent deterministic observation across extractors."""
+    out: List[Observation] = []
+    seen = set()
+    for obs in observations:
+        key = (
+            obs.metric_name,
+            obs.value,
+            obs.chunk_locator,
+            obs.as_of_date,
+            obs.scenario,
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(obs)
+    return out
 
 
 @dataclass
@@ -136,7 +157,10 @@ def run_pitchdeck_extraction(
     # --- Step 5-7: run extractors (pure, no DB) ---------------------------
     # Deterministic first -- cheap, no LLM tokens burned.
     engine = DeterministicEngine.from_yaml(rules)
-    det_obs = engine.extract(chunks)
+    table_obs = extract_table_observations(chunks, engine._rules)
+    layout_obs = extract_layout_observations(chunks, engine._rules)
+    raw_det_obs = table_obs + layout_obs + engine.extract(chunks)
+    det_obs = _dedupe_observations(raw_det_obs)
 
     # Compute which configured metrics the deterministic pass did NOT hit.
     configured_metrics = list(engine._rules.keys())  # internal but we own the module
@@ -145,7 +169,8 @@ def run_pitchdeck_extraction(
 
     _progress(
         f"Deterministic: covered {len(extracted_codes)}/{len(configured_metrics)} "
-        f"metrics ({len(det_obs)} raw matches)"
+        f"metrics ({len(det_obs)} deduped matches; {len(raw_det_obs)} raw; {len(table_obs)} from tables; "
+        f"{len(layout_obs)} from layout patterns)"
     )
 
     # LLM fallback (optional) -- only for metrics still missing.

@@ -71,6 +71,10 @@ class PitchDeckPreprocessor:
                 # extract_text() returns None on image-only pages.
                 raw = page.extract_text() or ""
                 cleaned = _normalise_whitespace(raw)
+                try:
+                    tables = page.extract_tables() or []
+                except Exception:
+                    tables = []
 
                 # Drop near-empty pages. They add noise to extractors and
                 # don't carry extractable signal. `ordinal` still counts
@@ -88,6 +92,7 @@ class PitchDeckPreprocessor:
                             "page_width": float(page.width),
                             "page_height": float(page.height),
                             "char_count": len(cleaned),
+                            "tables": tables,
                         },
                     )
                 )
