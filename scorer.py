@@ -46,6 +46,7 @@ class MetricScore:
     """Score for one individual metric for one company."""
     metric_id: str
     metric_name: str
+    metric_code: Optional[str]
     value_raw: Optional[str]         # Raw string from DB ("true", "4", "185000")
     value_numeric: Optional[float]   # Cast to float for formula (None if not computable)
     weight: float
@@ -72,6 +73,8 @@ class MetricTypeScore:
     type_score: Optional[float]      # None if no scoreable metrics exist for this type
     metric_scores: List[MetricScore] = field(default_factory=list)
     missing_must_haves: List[str] = field(default_factory=list)  # Names of missing must-haves
+    grounded_formula: Optional[str] = None
+    grounded_formula_inputs: List[Dict] = field(default_factory=list)
 
 
 @dataclass
@@ -128,6 +131,95 @@ def _cast_to_numeric(value_raw: Optional[str], value_type: str = "number") -> Op
         return None
 
 
+def _to_float(value_raw: Optional[str]) -> Optional[float]:
+    """Best-effort numeric parse for raw values used in custom formulas."""
+    if value_raw is None:
+        return None
+    try:
+        return float(str(value_raw).strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _clamp_score_1_to_5(value: float) -> float:
+    """Clamp any numeric sub-score into the canonical 1-5 scoring band."""
+    return max(1.0, min(5.0, value))
+
+
+def _grounded_financials_formula(metric_scores: List[MetricScore]) -> Tuple[Optional[float], Optional[str], List[Dict]]:
+    """Compute a grounded Financials score from concrete metric claims.
+
+    Formula (when inputs are available):
+      gross_margin_score = clamp(gross_margin_pct / 20, 1, 5)
+      runway_score       = clamp(runway_months / 6, 1, 5)
+      burn_eff_score     = clamp(1 + 2*(revenue / burn_rate), 1, 5)
+      stage_score        = funding_stage (already 1-5)
+
+      financials_score = weighted_avg(available components)
+      weights: gross_margin=0.35, runway=0.25, burn_eff=0.25, funding_stage=0.15
+
+    Every component is grounded in an existing metric claim from company_metric_value.
+    """
+    by_code = {ms.metric_code: ms for ms in metric_scores if ms.metric_code}
+    inputs: List[Dict] = []
+    components: List[Tuple[str, float, float]] = []
+
+    def add_component(name: str, score: float, weight: float, ms: MetricScore, raw_value: Optional[float]) -> None:
+        components.append((name, score, weight))
+        inputs.append(
+            {
+                "component": name,
+                "metric": ms.metric_name,
+                "metric_code": ms.metric_code,
+                "raw_value": ms.value_raw,
+                "derived_score": round(score, 2),
+                "weight": weight,
+                "source_name": ms.source_name,
+                "evidence": ms.raw_evidence,
+                "evidence_url": ms.evidence_url,
+                "formula_detail": f"raw={raw_value}" if raw_value is not None else None,
+            }
+        )
+
+    gross_margin = by_code.get("gross_margin")
+    gm_raw = _to_float(gross_margin.value_raw) if gross_margin else None
+    if gross_margin and gm_raw is not None:
+        gm_score = _clamp_score_1_to_5(gm_raw / 20.0)
+        add_component("gross_margin_score", gm_score, 0.35, gross_margin, gm_raw)
+
+    runway = by_code.get("runway_months")
+    runway_raw = _to_float(runway.value_raw) if runway else None
+    if runway and runway_raw is not None:
+        runway_score = _clamp_score_1_to_5(runway_raw / 6.0)
+        add_component("runway_score", runway_score, 0.25, runway, runway_raw)
+
+    revenue = by_code.get("revenue")
+    burn = by_code.get("burn_rate")
+    revenue_raw = _to_float(revenue.value_raw) if revenue else None
+    burn_raw = _to_float(burn.value_raw) if burn else None
+    if revenue and burn and revenue_raw is not None and burn_raw is not None and burn_raw > 0:
+        burn_eff = _clamp_score_1_to_5(1.0 + 2.0 * (revenue_raw / burn_raw))
+        add_component("burn_efficiency_score", burn_eff, 0.25, revenue, revenue_raw)
+
+    stage = by_code.get("funding_stage")
+    if stage and stage.value_numeric is not None:
+        stage_score = _clamp_score_1_to_5(stage.value_numeric)
+        add_component("funding_stage_score", stage_score, 0.15, stage, stage.value_numeric)
+
+    if not components:
+        return None, None, []
+
+    total_weight = sum(w for _, _, w in components)
+    final_score = sum(score * weight for _, score, weight in components) / total_weight
+    final_score = round(final_score, 2)
+    formula = (
+        "FinancialsScore = weighted_avg("
+        "gross_margin/20, runway_months/6, 1+2*(revenue/burn_rate), funding_stage"
+        ") on available inputs, then clamped to 1-5 per component"
+    )
+    return final_score, formula, inputs
+
+
 # ---------------------------------------------------------------------------
 # Core scoring functions
 # ---------------------------------------------------------------------------
@@ -161,6 +253,7 @@ def _score_metric_type(
         metric_scores.append(MetricScore(
             metric_id=row["metric_id"],
             metric_name=m.get("name", "Unknown"),
+            metric_code=m.get("code"),
             value_raw=row.get("value"),
             value_numeric=value_numeric,
             weight=float(m.get("weight", 1.0)),
@@ -195,6 +288,17 @@ def _score_metric_type(
             type_score = sum(ms.value_numeric * ms.weight for ms in scoreable) / total_weight
             type_score = round(type_score, 2)
 
+    grounded_formula = None
+    grounded_formula_inputs: List[Dict] = []
+    # First grounded formula rollout: Financials has the richest measured data
+    # (ARR/Revenue/GM/Burn/Runway/Stage) and highest business relevance.
+    if type_row.get("name") == "Financials":
+        fin_score, fin_formula, fin_inputs = _grounded_financials_formula(metric_scores)
+        if fin_score is not None:
+            type_score = fin_score
+            grounded_formula = fin_formula
+            grounded_formula_inputs = fin_inputs
+
     return MetricTypeScore(
         metric_type_id=type_row["id"],
         metric_type_name=type_row["name"],
@@ -203,6 +307,8 @@ def _score_metric_type(
         type_score=type_score,
         metric_scores=metric_scores,
         missing_must_haves=missing_must_haves,
+        grounded_formula=grounded_formula,
+        grounded_formula_inputs=grounded_formula_inputs,
     )
 
 

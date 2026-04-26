@@ -567,6 +567,38 @@ def render_metric_type_section(company_id: str, mts: MetricTypeScore):
                 unsafe_allow_html=True,
             )
 
+    # Grounded formula view: show exact scoring equation + which metric claims
+    # fed it. This is the business-facing trust layer for "why this score?".
+    if mts.grounded_formula:
+        with st.expander("🧮 Grounded formula and inputs", expanded=False):
+            st.markdown(f"**Formula used:** `{mts.grounded_formula}`")
+            if mts.grounded_formula_inputs:
+                formula_rows = []
+                for item in mts.grounded_formula_inputs:
+                    evidence = item.get("evidence") or "—"
+                    if len(evidence) > 120:
+                        evidence = evidence[:120] + "…"
+                    formula_rows.append({
+                        "Component": item.get("component", "—"),
+                        "Metric": item.get("metric", "—"),
+                        "Raw value": item.get("raw_value", "—"),
+                        "Derived score": item.get("derived_score", "—"),
+                        "Weight": item.get("weight", "—"),
+                        "Source": item.get("source_name", "—") or "—",
+                        "Evidence": evidence,
+                        "Link": item.get("evidence_url") or "",
+                    })
+
+                st.dataframe(
+                    pd.DataFrame(formula_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Evidence": st.column_config.TextColumn(width="large"),
+                        "Link": st.column_config.LinkColumn(width="small", display_text="open ↗"),
+                    },
+                )
+
     if not mts.metric_scores:
         st.caption("No metrics recorded yet for this dimension.")
         return

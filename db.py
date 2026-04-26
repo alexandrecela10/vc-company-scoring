@@ -178,6 +178,7 @@ def get_latest_values_for_company(company_id: str) -> List[Dict]:
         SELECT
             cmv.*,
             m.name          AS m_name,
+            m.code          AS m_code,
             m.value_type    AS m_value_type,
             m.must_have     AS m_must_have,
             m.metric_type_id AS m_metric_type_id,
@@ -192,6 +193,7 @@ def get_latest_values_for_company(company_id: str) -> List[Dict]:
     for r in rows:
         r["metric"] = {
             "name": r.pop("m_name"),
+            "code": r.pop("m_code"),
             "value_type": r.pop("m_value_type"),
             "must_have": r.pop("m_must_have"),
             "metric_type_id": str(r.pop("m_metric_type_id")),
