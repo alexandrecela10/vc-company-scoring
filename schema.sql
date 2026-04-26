@@ -516,12 +516,18 @@ CREATE TABLE IF NOT EXISTS metric_observation (
     evidence_text        TEXT,                       -- literal quote supporting the claim
     evidence_url         TEXT,                       -- for external/web sources
     confidence           FLOAT DEFAULT 1.0,          -- 0.0-1.0
+    as_of_date           DATE,                       -- date this claim refers to
+    period_granularity   TEXT,                       -- point_in_time | month | quarter | year | trailing_12m
+    scenario             TEXT,                       -- actual | estimate | projection | forecast
+    currency             TEXT,                       -- ISO-4217 code when metric is monetary
+    period_label         TEXT,                       -- raw source label, e.g. 2026E
+    observation_fingerprint TEXT NOT NULL,           -- idempotency key for grounded fact
     captured_at          TIMESTAMPTZ DEFAULT NOW(),
     created_at           TIMESTAMPTZ DEFAULT NOW(),
 
-    -- At most one observation per (run, company, metric). Re-running the same
-    -- extractor on the same input is idempotent.
-    UNIQUE (extraction_run_id, company_id, metric_id)
+    -- Fingerprint uniqueness preserves time-series rows while making reruns
+    -- idempotent for already-seen grounded facts.
+    UNIQUE (observation_fingerprint)
 );
 
 CREATE INDEX IF NOT EXISTS idx_metric_observation_company_metric
