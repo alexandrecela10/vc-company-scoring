@@ -15,6 +15,7 @@ safe for Streamlit's multi-threaded re-run model), then one function per query.
 
 import os
 import json
+import hashlib
 import logging
 import psycopg2
 import psycopg2.extras
@@ -177,6 +178,7 @@ def get_latest_values_for_company(company_id: str) -> List[Dict]:
         SELECT
             cmv.*,
             m.name          AS m_name,
+            m.code          AS m_code,
             m.value_type    AS m_value_type,
             m.must_have     AS m_must_have,
             m.metric_type_id AS m_metric_type_id,
@@ -191,6 +193,7 @@ def get_latest_values_for_company(company_id: str) -> List[Dict]:
     for r in rows:
         r["metric"] = {
             "name": r.pop("m_name"),
+            "code": r.pop("m_code"),
             "value_type": r.pop("m_value_type"),
             "must_have": r.pop("m_must_have"),
             "metric_type_id": str(r.pop("m_metric_type_id")),
@@ -910,6 +913,33 @@ def finish_extraction_run(
     )
 
 
+def metric_observation_fingerprint(
+    company_id: str,
+    source_document_id: Optional[str],
+    row: Dict,
+) -> str:
+    """Build a stable idempotency key for one metric observation row.
+
+    The key includes value + temporal fields + provenance identifiers so
+    repeated inserts of the same grounded fact are skipped, while distinct
+    periods/scenarios remain insertable.
+    """
+    payload = {
+        "company_id": company_id,
+        "metric_id": row["metric_id"],
+        "normalized_value": str(row["normalized_value"]),
+        "as_of_date": row.get("as_of_date") or "",
+        "scenario": row.get("scenario") or "",
+        "period_label": row.get("period_label") or "",
+        "currency": row.get("currency") or "",
+        "source_document_id": source_document_id or "",
+        "source_chunk_id": row.get("source_chunk_id") or "",
+        "evidence_text": row.get("evidence_text") or "",
+    }
+    stable = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.md5(stable.encode("utf-8")).hexdigest()
+
+
 def insert_metric_observations(
     run_id: str,
     company_id: str,
@@ -921,13 +951,14 @@ def insert_metric_observations(
     Each row dict must have: metric_id, normalized_value, raw_value (optional),
     evidence_text (optional), source_chunk_id (optional), confidence (optional).
 
-    UNIQUE(extraction_run_id, company_id, metric_id) guarantees idempotency --
-    re-running the same extractor on the same inputs is a no-op.
+    Idempotency is enforced via observation_fingerprint so a run can persist
+    multiple periods for the same metric (time-series), while exact duplicates
+    are still skipped.
     """
     if not rows:
         return 0
-    # Each row is now 14 columns: the original 9 + 5 temporal contract fields.
-    # All temporal fields are optional; missing keys default to NULL in DB.
+
+    # Each row is now 15 columns: prior fields + observation_fingerprint.
     values = [
         (
             run_id,
@@ -945,6 +976,7 @@ def insert_metric_observations(
             r.get("scenario"),
             r.get("currency"),
             r.get("period_label"),
+            metric_observation_fingerprint(company_id, source_document_id, r),
         )
         for r in rows
     ]
@@ -958,10 +990,11 @@ def insert_metric_observations(
                 source_document_id, source_chunk_id,
                 evidence_text, confidence,
                 as_of_date, period_granularity, scenario,
-                currency, period_label
+                currency, period_label,
+                observation_fingerprint
             )
             VALUES %s
-            ON CONFLICT (extraction_run_id, company_id, metric_id) DO NOTHING
+            ON CONFLICT (observation_fingerprint) DO NOTHING
             RETURNING id
             """,
             values,

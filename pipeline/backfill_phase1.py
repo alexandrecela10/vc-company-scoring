@@ -186,22 +186,24 @@ def run(dry_run: bool = False, force: bool = False) -> Dict[str, int]:
             stats["observations_created"] += 1
             continue
 
-        # Insert the observation. Unique (run, company, metric) → re-running
-        # the backfill is a no-op thanks to ON CONFLICT DO NOTHING.
+        # Insert the observation. Fingerprint uniqueness makes reruns idempotent
+        # without collapsing time-series rows for the same metric.
         obs_row = db._execute("""
             INSERT INTO metric_observation (
                 extraction_run_id, company_id, metric_id,
                 raw_value, normalized_value,
                 evidence_text, evidence_url,
-                confidence, captured_at
+                confidence, captured_at,
+                observation_fingerprint
             )
             VALUES (
                 %s, %s, %s,
                 %s, %s,
                 %s, %s,
-                %s, %s
+                %s, %s,
+                md5(concat_ws('||', %s, %s, %s, %s, %s))
             )
-            ON CONFLICT (extraction_run_id, company_id, metric_id) DO NOTHING
+            ON CONFLICT (observation_fingerprint) DO NOTHING
             RETURNING id
         """, (
             run_id, company_id, metric_id,
@@ -211,6 +213,11 @@ def run(dry_run: bool = False, force: bool = False) -> Dict[str, int]:
             cmv.get("evidence_url"),
             float(cmv.get("confidence") or 1.0),
             cmv.get("captured_at"),
+            company_id,
+            metric_id,
+            str(cmv["value"]),
+            str(cmv.get("raw_evidence") or ""),
+            str(cmv.get("captured_at") or ""),
         ))
 
         if obs_row is None:

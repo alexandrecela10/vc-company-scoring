@@ -1,228 +1,198 @@
-# Company Scorer
+# Company Intelligence — Grounded, Sovereign Deal Sourcing for VCs
 
-**A grounded data foundation for VC deal-sourcing AI workflows.**
-
-This repository is two things at once:
-
-1. A working Streamlit app that scores companies in a deal-sourcing pipeline.
-2. A **provenance-first data platform** designed so AI workflows built on top are faster, more precise, and never hallucinate.
-
-If you're here to build AI workflows on top of this data, read on — the architecture is specifically designed to make your job easier.
-
-> For a 5-minute product walkthrough, see [`DEMO.md`](./DEMO.md).
+> **A grounded, AI-sovereign company-intelligence engine for venture capital funds.**
+> Track more companies, rank them automatically, and defend every score with full provenance.
 
 ---
 
-## 1. Why this exists (problem statement)
+## 1. Business Proposal
 
-VC deal sourcing generates huge amounts of unstructured context per company — pitch decks, meeting notes, news, LinkedIn profiles, Crunchbase dumps, founder emails. AI workflows on top of this (scoring, gap-filling, alerting, comparison, memo-drafting) live or die on **whether the inputs are trustworthy**.
+### The problem
 
-Most "AI company database" projects fail because:
+VC deal sourcing is bottlenecked by manual triage. Analysts spend hours on inbox archaeology and shallow scans across decks, news, LinkedIn, and Crunchbase. Good companies sit untouched while competitors reach the founder first. Decisions rely on trust-me memos with no audit trail, and "AI tools" frequently hallucinate — making them unsafe for IC and LPs.
 
-- They let the LLM be the source of truth. Hallucinations contaminate every downstream call.
-- They mash facts from different sources without tracking which source said what.
-- They don't distinguish "analyst said so" from "Crunchbase said so 2 years ago" from "Gemini guessed".
-- They can't re-extract yesterday's deck with today's improved rules.
+### The product
 
-This repo is engineered to prevent all four failure modes by design.
+A company-intelligence platform that:
 
----
+- **Ingests** pitch decks (inbound) and outbound signals (web, news, filings).
+- **Extracts** structured, grounded observations — every fact tied to a source quote.
+- **Scores** companies using transparent formulas — each component is auditable.
+- **Ranks** the deal pipeline so analysts open their day with the right call list.
+- **Tracks** changes over time — projections, actuals, and "what changed overnight".
+- **Stays sovereign** — provenance + extractor versioning + designed-in data control.
 
-## 2. Architectural principles
+### Who it’s for
 
-### 2.1 Medallion data layout (Bronze → Silver → Gold)
-
-```
-Bronze          Silver                   Gold
-------          ------                   ----
-source_document metric_observation       company_metric_value
-source_chunk    (append-only, many       (canonical value per
-(raw files +    rows per fact, one       (company, metric),
- per-page       per (run, source,        picked by the resolver)
- chunks)        metric, company))
-```
-
-- **Bronze** is **what we saw**: raw bytes + per-page text chunks. Append-only.
-- **Silver** is **what sources claim**: every observation is an immutable row pointing at an extractor, a run, and the exact source chunk + evidence quote. Many rows per `(company, metric)` pair — disagreements are preserved, never overwritten.
-- **Gold** is **what we believe**: exactly one canonical value per `(company, metric)`, chosen by the resolver from the Silver observations (or set manually by an analyst override). This is what the UI reads and what AI workflows consume by default.
-
-**Why this matters for AI workflows**: a downstream agent can trust Gold values without rechecking them, while always being able to drill back through `winning_observation_id → source_chunk_id → source_document_id` to see the exact quote that produced the value. No more "ask the LLM again because we don't know where this number came from".
-
-### 2.2 Grounding invariant (enforced in code)
-
-Every extracted value in Silver must satisfy:
-
-```
-evidence_text must be a LITERAL SUBSTRING of the source chunk.
-```
-
-This invariant is enforced at three layers:
-
-- **Deterministic extractors** (`pipeline/extractors/deterministic.py`): the match itself is the substring, by construction.
-- **LLM fallback** (`pipeline/extractors/llm_fallback.py`): the model's `evidence_quote` is verified against the chunk text; a paraphrased quote is rejected and no row is written.
-- **Web-sourced extractors** (`link_verifier.py`): the cited URL is fetched, HTML-stripped, and searched for the verbatim quote.
-
-**Why this matters for AI workflows**: any claim you read from Silver or Gold can be rendered with its exact source quote in milliseconds. You can build verification UIs, audit logs, and "why did you say this?" tooltips for free.
-
-### 2.3 Provenance chain (every fact is traceable)
-
-```
-company_metric_value          (Gold: the canonical value)
-   └─ winning_observation_id → metric_observation      (Silver: one of N claims)
-      └─ extraction_run_id   → extraction_run          (when / how)
-         └─ extractor_id     → extractor               (which code version)
-      └─ source_chunk_id     → source_chunk            (Bronze: the exact text)
-         └─ source_document  → source_document         (Bronze: the file)
-```
-
-One function (`db.get_provenance_chain`) walks the entire chain. Build audit trails, compliance reports, or "re-extract with new rules" tooling on top of this.
-
-### 2.4 Deterministic first, LLM only as fallback
-
-Pitch-deck extraction is structured in two phases:
-
-1. **Deterministic engine** (regex + enum_map + range validation) runs first. Cheap, auditable, no tokens burned.
-2. **LLM fallback** runs only for metrics the deterministic pass did not extract. The fallback narrows context via keyword retrieval (not embeddings — overkill for 30-slide decks), calls the LLM once per missing metric, and rejects any response that fails the grounding invariant.
-
-**Why this matters for AI workflows**: 70-80% of known metrics get extracted without any LLM cost and with perfect auditability. The LLM is used where it excels (reading "we have 35 engineers shipping weekly") and never where it's prone to fabricate (currency arithmetic, year-vs-zipcode confusion).
-
-### 2.5 Provider-agnostic LLM layer
-
-```
-pipeline/extractors/llm_provider.py
-  LLMProvider     (Protocol)         ← the contract
-  GeminiProvider  (implementation)   ← today
-  AnthropicProvider, OpenAIProvider  ← tomorrow, one new class each
-```
-
-Every LLM-touching component (LLM fallback, future agents) accepts an `LLMProvider`. Swapping models is a dependency-injection change, not a rewrite.
-
-### 2.6 Extensibility contracts
-
-| New thing you want to add | What you touch |
+| Persona | What they get |
 |---|---|
-| New extraction rule for an existing metric | `pipeline/rules.yaml` — append a pattern |
-| New metric | `pipeline/rules.yaml` + CLI registers it in DB + rules in one atomic step (coming in step 9) |
-| New source type (e.g. meeting notes, Notion pages) | Implement `Preprocessor` + new orchestrator in `pipeline/extractors/<source>_v1.py` |
-| New LLM provider | One new class implementing `LLMProvider.complete(prompt) -> str` |
-| New scoring logic | `scorer.py` — Option B multiplicative formula isolated here |
+| **VC Analyst** | Ranked queue, grounded scorecards, evidence on every claim, daily morning digest, IC-ready exports |
+| **VC Fund CEO** | More companies tracked, faster pipeline velocity, defensible scoring, LP-ready reports, AI sovereignty posture |
 
-None of these require DB schema changes (the schema was designed around the extractor/observation abstraction in Phase 1).
+### Business impact (user stories)
+
+Sourced from the [`docs/jasoor_user_stories.pdf`](./docs/jasoor_user_stories.pdf):
+
+| Persona | Advantage | Business outcome |
+|---|---|---|
+| VC Analyst | Grounded, source-linked company facts | Higher trust in data, fewer bad decisions |
+| VC Analyst | Faster time-to-insight, fewer LLM calls | Lower cost, better tool adoption |
+| VC Analyst | Ranked deal pipeline + must-have checks | Focus on best opportunities first |
+| VC Analyst | Daily morning email with key changes | Faster reaction to market & company updates |
+| VC Analyst | One place for financials, evidence, and scoring logic | Less context switching, faster IC prep |
+| VC Fund CEO | More companies ingested and continuously tracked | Larger qualified top-of-funnel |
+| VC Fund CEO | Faster progression through the sourcing pipeline | More efficient deal velocity |
+| VC Fund CEO | Transparent, auditable scoring framework | Better governance & investment discipline |
+| VC Fund CEO | LP-ready reporting (coverage, pipeline quality, score trends) | Stronger LP narrative & credibility |
+| VC Fund CEO | AI-sovereign posture (data control, traceability) | Reduced compliance & reputation risk |
+
+### Demo materials
+
+- **Product walkthrough deck:** [`docs/jasoor_company_intelligence_demo.pdf`](./docs/jasoor_company_intelligence_demo.pdf)
+- **User stories one-pager:** [`docs/jasoor_user_stories.pdf`](./docs/jasoor_user_stories.pdf)
+- **5-minute live demo script:** [`DEMO.md`](./DEMO.md)
+
+### North star
+
+> Invest in as many great deals as possible, more often and faster than the competition — backed by data the fund can defend.
 
 ---
 
-## 3. Where AI workflows plug in
+## 2. Architecture (high level)
 
-The Gold layer (`company_metric_value`) is your read-side. The Silver layer (`metric_observation`) is your audit-side. Bronze (`source_document` + `source_chunk`) is your re-extraction-side.
+The system is built on a **medallion data model** with a strict grounding invariant and append-only history. This is what makes scores defensible and AI workflows on top safe.
 
-Concrete entry points for AI workflows:
-
-### 3.1 "Answer a question about a company"
-
-```python
-# Fast path: Gold has everything you need, canonically resolved.
-import db
-values = db.get_latest_values_for_company(company_id)
-# Each row has: metric name, canonical value, evidence_text, source URL,
-# url_verified flag, captured_at, override flag. You can render + cite
-# without any further LLM call.
+```
+Bronze            Silver                       Gold
+------            ------                       ----
+source_document   metric_observation           company_metric_value
+source_chunk      (immutable, time-series,     (canonical value per
+(raw files +      one row per claim with       (company, metric),
+ per-page         provenance + temporal         picked by resolver)
+ chunks)          contract)
 ```
 
-### 3.2 "Why did we say X?" (grounded explanations)
+- **Bronze — what we saw**: raw bytes + per-page chunks. Append-only.
+- **Silver — what sources claim**: every observation is immutable, with extractor + run + chunk + evidence quote + temporal contract (`as_of_date`, `scenario`, `period_label`, `currency`).
+- **Gold — what we believe**: exactly one canonical value per `(company, metric)`, picked by the resolver (or set by analyst override). UI and AI workflows read this by default.
 
-```python
-chain = db.get_provenance_chain(company_id, metric_id)
-# → returns joined cmv + observation + run + extractor + source_document.
-# Feed this straight into a UI tooltip or an LLM "explain-this" prompt.
+### Core principles
+
+| Principle | Why it matters |
+|---|---|
+| **Grounding invariant** — `evidence_text` must be a literal substring of the source chunk | No hallucinations; every claim is verifiable |
+| **Deterministic first, LLM as fallback** — regex + enum + table-aware patterns run before any LLM call | Lower cost, better auditability, faster |
+| **Provenance chain** — value → observation → run → extractor → chunk → document | One query explains "why did we say this?" |
+| **Append-only Silver** — never `UPDATE` or `DELETE` a fact; new observations land alongside old ones | Re-running with new rules is risk-free |
+| **Time-series safe** — temporal contract on every observation; `metric_projection_vs_actual` view | Compare projections vs actuals; track drift |
+| **Provider-agnostic LLM layer** — `LLMProvider` protocol with swappable implementations | Vendor-neutral; sovereignty-ready |
+| **Override system** — analyst-locked values are never overwritten by agents; reasons captured | Analyst expertise becomes institutional memory |
+
+### Sovereignty posture
+
+This system is designed for jurisdictions that care about data residency, egress control, and auditability. See:
+- [`SOVEREIGN_DEPLOYMENT.md`](./SOVEREIGN_DEPLOYMENT.md) — deployment topology, residency, provider abstraction
+- [`THREAT_MODEL.md`](./THREAT_MODEL.md) — assets, actors, surfaces, mitigations
+
+### Grounded scoring
+
+The default scoring formula is **Option B — multiplicative penalty**:
+
+```
+metric_type_score  = weighted_avg(child metric values)
+overall_score      = weighted_avg(metric_type_scores) × (min must_have_score / 5.0)
 ```
 
-### 3.3 "Re-extract a deck with the new rules"
+A must-have type scoring 1/5 caps the overall at ~20% of its potential. Missing must-haves → score is `NULL` and a gap action fires.
 
-```python
-from pipeline.extractors.pitchdeck_v1 import run_pitchdeck_extraction
-result = run_pitchdeck_extraction(raw_bytes, company_id)
-# Idempotent (content-hashed source_document; UNIQUE run-metric constraint).
-# Old observations are preserved; the resolver picks the newest winner.
+For data-rich types (Financials shipped first), a **grounded formula** replaces the generic average:
+
+```
+FinancialsScore = weighted_avg(
+    gross_margin / 20,
+    runway_months / 6,
+    1 + 2 * (revenue / burn_rate),
+    funding_stage
+) → clamped 1–5 per component
 ```
 
-### 3.4 "Find the company this deck is about" (entity resolution)
+Each input is sourced from a real `metric_observation`. The UI exposes the formula and per-component evidence in the scorecard.
 
-```python
-from pipeline.entity_resolver import EntityResolver
-resolver = EntityResolver.from_db()
-candidates = resolver.resolve(filename, chunks)
-# Top candidate: candidates[0] has .company_id, .score, .signals.
-# Signals like ["alias:tabby technologies ltd", "domain:tabby.ai"] explain WHY.
+---
+
+## 3. Pipeline anatomy (end-to-end)
+
+```
+1. UI receives a PDF (Streamlit upload tab)
+   ↓
+2. Entity resolver → company_id          [pipeline/entity_resolver.py]
+   ↓
+3. PitchDeckPreprocessor bytes → chunks   [pipeline/preprocessors/pitch_deck.py]
+   ↓
+4. DeterministicEngine(chunks)            [pipeline/extractors/deterministic.py]
+     regex + enum_map + range validation + table + layout patterns
+   ↓
+5. LLMFallback(chunks, missing_metrics)   [pipeline/extractors/llm_fallback.py]
+     LLM call only for unfilled metrics; quote-verified against chunk
+   ↓
+6. Orchestrator persists Bronze + Silver  [pipeline/extractors/pitchdeck_v1.py]
+     - source_document (content-hashed, idempotent)
+     - source_chunks (bulk insert)
+     - extraction_run (audit trail)
+     - metric_observations (bulk insert with fingerprint + temporal contract)
+   ↓
+7. value_resolver.resolve_all_for_company  [pipeline/value_resolver.py]
+     Picks winning observation per (company, metric); upserts Gold
 ```
 
-### 3.5 "Agent needs to fill in a missing value"
-
-The `gap_agent.py` pattern: detect gaps, offer bounded actions (Tavily search, email draft, LinkedIn lookup). Every agent-produced value goes back through Silver with full provenance, so downstream workflows don't need to distinguish human-entered from agent-entered facts — the `extractor.name` on the observation tells them.
+Everything is **idempotent**: content-hashed source documents, observation fingerprints for time-series-safe inserts, upsert semantics on Gold. Re-uploading the same deck produces zero duplicate rows.
 
 ---
 
 ## 4. Data model summary
 
-### Core tables (alphabetical; bolded = most-used)
-
 | Table | Layer | Purpose |
 |---|---|---|
-| `company` | — | One row per company, plus `linkedin_url`, website |
-| `company_alias` | — | Legal names, DBAs, domains, former names. Feeds entity resolver |
-| **`company_metric_value`** | **Gold** | Canonical value per `(company, metric)`. Read by UI + AI workflows |
-| `context_fact` | — | Dimensional facts (industry CAGR etc.) shared across companies (Phase 3) |
-| `extraction_run` | Silver | One row per execution of an extractor. Audit unit |
-| `extractor` | Silver | Registry: `(name, version)`. Versioned so old observations are preserved across rule changes |
-| `founder` | — | Company team members |
-| `gap_action` | — | Agent-driven actions to fill missing must-haves |
-| `metric` | — | Individual measurable metrics. `metric.code` (snake_case) is the stable ID for rules.yaml |
-| `metric_type` | — | Dimension categories (Founders Strength, Tech Moat, ...) |
-| **`metric_observation`** | **Silver** | **Immutable, append-only fact table.** Every claim about `(company, metric)` is a row here |
-| `news_article` | — | Cached Tavily news results |
+| `company` | — | One row per company; aliases in `company_alias` |
+| `metric_type` / `metric` | — | Dimension catalog (Founders Strength, Tech Moat, ...) and individual metrics. `metric.code` is the stable API key |
+| **`source_document`** | **Bronze** | Ingested files; dedup by SHA-256 |
+| **`source_chunk`** | **Bronze** | Per-page/slide chunks (embedding-ready) |
+| `extractor` | Silver | Registry of `(name, version)` |
+| `extraction_run` | Silver | One row per extractor execution |
+| **`metric_observation`** | **Silver** | Append-only fact table with temporal contract + `observation_fingerprint` |
+| **`company_metric_value`** | **Gold** | Canonical value per `(company, metric)`; `winning_observation_id` points back to Silver |
+| `gap_action` | — | Agent-driven follow-ups for missing must-haves |
 | `pipeline_event` | — | Stage transition history with score snapshot |
-| **`source_chunk`** | **Bronze** | Per-page (or per-slide) chunks of source documents. Embedded in Phase 4 |
-| **`source_document`** | **Bronze** | One row per ingested file. Dedup keyed by SHA-256 of bytes |
 | `user_weight` | — | Per-analyst weights per metric type |
+| `news_article` | — | Cached web signals (Tavily) |
 
-### Key invariants
+**Key invariants**
 
-- `metric_observation` is **append-only**. Never `UPDATE` or `DELETE` a fact.
-- `UNIQUE (extraction_run_id, company_id, metric_id)` on observations makes re-running idempotent.
-- `company_metric_value.winning_observation_id` is the canonical pointer from Gold → Silver.
-- `source_document.content_hash UNIQUE` means re-uploading the same PDF is a no-op.
-- `metric.code` (stable snake_case) is the API key between `rules.yaml` and the DB. `metric.name` can change for UX; `code` must not.
+- `metric_observation` is append-only.
+- `UNIQUE (observation_fingerprint)` — re-running an extractor is idempotent, while still allowing multiple time-series observations per `(company, metric)`.
+- `company_metric_value.winning_observation_id` → canonical pointer Gold→Silver.
+- `source_document.content_hash UNIQUE` → re-uploading the same PDF is a no-op.
 
 ---
 
-## 5. Pipeline anatomy (Bronze → Silver → Gold, end-to-end)
+## 5. Where AI workflows plug in
 
-```
-1. UI receives a PDF (Streamlit upload tab)
-   │
-2. Entity resolver → company_id          [pipeline/entity_resolver.py]
-   │   (filename + deck chunks + aliases + fuzzy match)
-   │
-3. PitchDeckPreprocessor bytes → chunks   [pipeline/preprocessors/pitch_deck.py]
-   │   (one chunk per text-bearing slide)
-   │
-4. DeterministicEngine(chunks)            [pipeline/extractors/deterministic.py]
-   │   → observations (regex + enum_map; range-validated)
-   │
-5. LLMFallback(chunks, missing_metrics)   [pipeline/extractors/llm_fallback.py]
-   │   → observations (LLM call, quote-verified)
-   │
-6. Orchestrator persists Bronze + Silver  [pipeline/extractors/pitchdeck_v1.py]
-   │   → source_document (content-hashed)
-   │   → source_chunks (bulk insert)
-   │   → extraction_run (audit trail)
-   │   → metric_observations (bulk insert)
-   │
-7. value_resolver.resolve_all_for_company  [pipeline/value_resolver.py]
-       → picks winning observation per (company, metric)
-       → upserts Gold (company_metric_value)
+The **Gold** layer is the read-side. **Silver** is the audit-side. **Bronze** is the re-extraction-side.
+
+```python
+# Read canonical company facts (no LLM call needed)
+import db
+values = db.get_latest_values_for_company(company_id)
+
+# Explain "why did we say this?"
+chain = db.get_provenance_chain(company_id, metric_id)
+
+# Re-extract a deck with new rules (idempotent)
+from pipeline.extractors.pitchdeck_v1 import run_pitchdeck_extraction
+result = run_pitchdeck_extraction(raw_bytes, company_id)
 ```
 
-Everything above is **idempotent**: content-hashed source documents, UNIQUE constraints on observations, upsert semantics on Gold. Re-uploading the same deck produces zero duplicate rows.
+Any agent (gap, market, outbound) writes its outputs back through Silver with full provenance — downstream workflows don’t need to distinguish human from agent claims, the `extractor.name` says everything.
 
 ---
 
@@ -231,62 +201,43 @@ Everything above is **idempotent**: content-hashed source documents, UNIQUE cons
 ```
 company_scorer/
 ├── app.py                         # Streamlit UI (scorecard, intel, pipeline, table browser)
-├── scorer.py                      # Scoring engine (Option B multiplicative)
-├── db.py                          # All DB helpers. psycopg2 + Supabase Postgres
+├── scorer.py                      # Scoring engine (Option B + grounded formulas)
+├── db.py                          # All DB helpers (psycopg2 + Supabase Postgres)
 ├── pipeline/
 │   ├── rules.yaml                 # Per-metric extraction rules (regex + enum + LLM config)
 │   ├── value_resolver.py          # Silver → Gold: pick the winning observation
 │   ├── entity_resolver.py         # Resolve uploaded docs → company_id
-│   ├── preprocessors/
-│   │   ├── base.py                # Chunk dataclass + Preprocessor contract
-│   │   └── pitch_deck.py          # PDF → per-slide Chunks (pdfplumber)
-│   ├── extractors/
-│   │   ├── base.py                # Observation dataclass + Extractor contract
-│   │   ├── deterministic.py       # regex + enum_map engine (no LLM)
-│   │   ├── llm_fallback.py        # LLM-only-when-needed, quote-verified
-│   │   ├── llm_provider.py        # Provider-agnostic LLM interface
-│   │   └── pitchdeck_v1.py        # Orchestrator: preprocess → extract → persist → resolve
-│   ├── migrate_phase2a_*.py       # Idempotent Phase 2a schema migrations
-│   └── backfill_phase1.py         # Turn seed CMV rows into Silver observations
+│   ├── preprocessors/             # PDF → per-slide chunks (pdfplumber)
+│   ├── extractors/                # Deterministic, LLM fallback, layout patterns, table-aware
+│   └── migrate_phase*.py          # Idempotent schema migrations
+├── discovery.py                   # Outbound discovery (Alpha Scout bridge)
 ├── gap_agent.py                   # Detects missing must-haves, drafts outreach
-├── market_agent.py                # Tavily + Gemini market signal refresher
+├── market_agent.py                # Tavily + LLM market signal refresher
 ├── company_intel.py               # News fetching + stage transitions
 ├── link_verifier.py               # Deterministic evidence-URL verification
-├── llm_client.py                  # Gemini wrapper (retries, Langfuse tracing)
+├── llm_client.py                  # LLM wrapper (retries, Langfuse tracing)
 ├── tracing.py                     # Langfuse integration
 ├── grounding.py                   # Shared grounding primitives
-├── schema.sql                     # Postgres schema (run once in Supabase SQL editor)
-├── seed.sql                       # Demo data (6 companies, partial metrics, gaps)
-├── reset.sql                      # TRUNCATE helper for a clean reseed
-├── tests/                         # unittest suite (36 tests, runs in <1s)
+├── schema.sql                     # Postgres schema (run once in Supabase)
+├── seed.sql                       # Demo data
+├── tests/                         # unittest suite (65+ tests)
+├── docs/
+│   ├── jasoor_company_intelligence_demo.pdf  # Product walkthrough
+│   └── jasoor_user_stories.pdf               # Persona advantages + outcomes
+├── DEMO.md                        # 5-min demo script
+├── ARCHITECTURE.md                # Deeper design rationale
+├── SOVEREIGN_DEPLOYMENT.md        # Sovereignty deployment blueprint
+├── THREAT_MODEL.md                # Threat model
 ├── requirements.txt
 ├── .env.example
-└── README.md
+└── README.md                      # ← this file
 ```
 
 ---
 
-## 7. Scoring (product side)
+## 7. Setup
 
-### Formula (Option B — Multiplicative Penalty)
-
-```
-metric_type_score  = weighted_avg(child metric values)
-overall_score      = weighted_avg(metric_type_scores) × Π(must_have_score / 5.0)
-```
-
-- A must-have metric scoring `1/5` caps the overall score at 20% of its potential.
-- If any must-have has **no value at all**, `overall_score = NULL` and a gap action fires.
-
-### Why multiplicative? 
-
-VCs don't invest in companies that fail a must-have, no matter how strong they are elsewhere. An additive formula lets "great founders + great tech moat" paper over "no product-market fit evidence". Multiplication makes deficits visible.
-
----
-
-## 8. Setup
-
-### 8.1 Install
+### 7.1 Install
 
 ```bash
 python -m venv venv
@@ -294,28 +245,29 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 8.2 Configure
+### 7.2 Configure
 
 ```bash
 cp .env.example .env
-# Fill in: GEMINI_API_KEY, TAVILY_API_KEY, LANGFUSE_*, SUPABASE_DB_URL
+# Fill in: SUPABASE_DB_URL, GEMINI_API_KEY, TAVILY_API_KEY, LANGFUSE_* (optional)
 ```
 
-### 8.3 Database
+### 7.3 Database (Supabase Postgres)
 
-1. Create a project at https://supabase.com
-2. Open the SQL Editor, run `schema.sql`
-3. Run `seed.sql` for demo data (6 companies, partial metrics)
-4. (Optional) run `python3 -m pipeline.backfill_phase1` to materialize Phase 1 observations from seed data
-5. (Optional) run `python3 -m pipeline.migrate_phase2a_company_alias` to seed domain aliases
+1. Create a Supabase project.
+2. Run `schema.sql` in the SQL editor.
+3. Run `seed.sql` for demo data.
+4. (Optional) `python3 -m pipeline.backfill_phase1` to materialize observations from seed data.
+5. (Optional) `python3 -m pipeline.migrate_phase2d_timeseries_persistence` for time-series fingerprints.
+6. (Optional) `python3 -m pipeline.migrate_phase2e_projection_vs_actual_view` for the projection-vs-actual view.
 
-### 8.4 Run
+### 7.4 Run the app
 
 ```bash
 streamlit run app.py
 ```
 
-### 8.5 Run tests
+### 7.5 Run tests
 
 ```bash
 python3 -m unittest discover tests -v
@@ -323,37 +275,46 @@ python3 -m unittest discover tests -v
 
 ---
 
-## 9. Environment variables
+## 8. Environment variables
 
 | Variable | Required | Purpose |
 |---|---|---|
-| `SUPABASE_DB_URL` | yes | Postgres connection string (pooler URL from Supabase) |
-| `GEMINI_API_KEY` | yes | Google AI Studio key — LLM extraction + agents |
-| `TAVILY_API_KEY` | yes | Web search for market agent + gap agent + news |
-| `LANGFUSE_PUBLIC_KEY` | no | LLM call tracing (recommended for debugging) |
+| `SUPABASE_DB_URL` | yes | Postgres connection string |
+| `GEMINI_API_KEY` | yes | LLM extraction + agents |
+| `TAVILY_API_KEY` | yes | Web search for market & gap agents and news |
+| `LANGFUSE_PUBLIC_KEY` | no | LLM call tracing (recommended) |
 | `LANGFUSE_SECRET_KEY` | no | Pair with above |
-| `LANGFUSE_HOST` | no | Defaults to https://cloud.langfuse.com |
+| `LANGFUSE_HOST` | no | Defaults to `https://cloud.langfuse.com` |
 
 ---
 
-## 10. Current phase & roadmap
+## 9. Roadmap
 
-| Phase | Status | What it delivers |
+| Phase | Status | Delivers |
 |---|---|---|
-| Phase 1 — Provenance foundation | ✅ Done | Bronze/Silver/Gold schema, extractor registry, provenance chain, value resolver. Backfilled from seed data |
-| Phase 2a — Pitch-deck extraction | 🚧 ~80% | Preprocessor, deterministic engine, LLM fallback, orchestrator, entity resolver. **Pending:** metric CLI, Upload UI, gap-action creation on failure |
-| Phase 2b — Meeting notes, emails, Notion | ⏳ Planned | New preprocessors; extractor orchestrators reuse the same `DeterministicEngine` + `LLMFallback` |
-| Phase 3 — Context facts | ⏳ Planned | `context_fact` table: industry CAGR, geography multipliers, etc., shared across companies |
-| Phase 4 — Embeddings + semantic retrieval | ⏳ Planned | Migrate `source_chunk.embedding` from `FLOAT[]` to `pgvector`; HNSW index; semantic search over Silver |
+| Phase 1 — Provenance foundation | ✅ Done | Bronze/Silver/Gold schema, provenance chain, value resolver |
+| Phase 2a–c — Pitch-deck extraction | ✅ Done | Preprocessor, deterministic engine, LLM fallback, table + layout patterns, temporal contract |
+| Phase 2d — Time-series persistence | ✅ Done | Observation fingerprint, idempotent inserts, multiple temporal observations per metric |
+| Phase 2e — Projection vs actual | ✅ Done | `metric_projection_vs_actual` view |
+| Phase 3 — Grounded scoring (per type) | 🚧 Financials shipped; Founders, Market, Tech Moat next |
+| Phase 4 — Outbound signals + daily run | ⏳ Planned | Continuous tracking + morning digest |
+| Phase 5 — Model/prompt provenance + provider abstraction | ⏳ Planned | True AI-sovereign enforcement (not just docs) |
+| Phase 6 — Multi-fund foundation | ⏳ Planned | `fund_id` scoping, metric templates + per-fund overrides |
+| Phase 7 — Embeddings + semantic retrieval | ⏳ Planned | `pgvector` over Bronze chunks |
 
 ---
 
-## 11. Notes for AI engineers
+## 10. Notes for engineers
 
-- **Read [`ARCHITECTURE.md`](./ARCHITECTURE.md)** for the deeper design rationale (source-priority ladder, resolver rules, override semantics).
-- **Every DB write path has a helper in `db.py`.** Don't write SQL from new modules; add a helper instead.
-- **Every LLM call should go through `llm_client.call_gemini()` or a future provider.** Langfuse tracing + retries are free that way.
-- **The grounding invariant is load-bearing.** If you add a new extractor, your tests must assert evidence is a substring of the chunk text. See `tests/test_deterministic.py::test_evidence_is_substring_of_chunk`.
-- **Prefer deterministic extraction when possible.** LLM fallback is a safety net, not a default.
-- **Append, don't overwrite.** Silver is immutable. If a new run contradicts an old observation, both rows exist; the resolver picks the winner. This is what makes "re-run with new rules" a no-risk operation.
+- **Read [`ARCHITECTURE.md`](./ARCHITECTURE.md)** for source-priority ladder, resolver rules, and override semantics.
+- **Every DB write goes through `db.py`.** Don’t write SQL from new modules; add a helper.
+- **Every LLM call goes through `llm_client`.** Tracing + retries are free that way.
+- **The grounding invariant is load-bearing.** New extractors must assert evidence is a substring of the chunk text (`tests/test_deterministic.py`).
+- **Prefer deterministic extraction.** LLM fallback is a safety net, not a default.
+- **Append, don’t overwrite.** Silver is immutable. The resolver picks the winner.
 
+---
+
+## License & confidentiality
+
+Confidential prototype. © Alexandre Cela, 2026. All rights reserved.

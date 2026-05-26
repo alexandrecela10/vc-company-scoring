@@ -74,6 +74,12 @@ if not getattr(logging, "_scorer_configured", False):
 # This is the single source of truth for "how long did this rerun take?"
 _RENDER_START = time.perf_counter()
 
+# Cache schema version for scorecard objects.
+# Why: when dataclass fields change (e.g., grounded_formula), old cached
+# objects can miss new attributes and crash rendering. Bump this constant
+# whenever the scorecard object shape changes.
+SCORECARD_CACHE_SCHEMA_VERSION = 2
+
 # ---------------------------------------------------------------------------
 # Page config
 # ---------------------------------------------------------------------------
@@ -142,7 +148,7 @@ def bump_data_version():
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=120, show_spinner=False)
-def cached_score_company(company_id: str, user_id: str, version: int):
+def cached_score_company(company_id: str, user_id: str, version: int, schema_version: int):
     """Score ONE company. Keyed by company version so a write to another
     company does NOT invalidate this entry — this is the main perf win."""
     return scorer.score_company(company_id, user_id)
@@ -302,6 +308,7 @@ def render_sidebar():
                         c["id"],
                         st.session_state.user_id,
                         company_version(c["id"]),
+                        SCORECARD_CACHE_SCHEMA_VERSION,
                     )
                     all_scorecards.append(sc)
                 except Exception as e:
@@ -566,6 +573,40 @@ def render_metric_type_section(company_id: str, mts: MetricTypeScore):
                 f'<span style="color:#f59e0b;font-size:0.8rem">⚠️ Must-have metric missing: {name}</span>',
                 unsafe_allow_html=True,
             )
+
+    # Grounded formula view: show exact scoring equation + which metric claims
+    # fed it. This is the business-facing trust layer for "why this score?".
+    grounded_formula = getattr(mts, "grounded_formula", None)
+    grounded_formula_inputs = getattr(mts, "grounded_formula_inputs", [])
+    if grounded_formula:
+        with st.expander("🧮 Grounded formula and inputs", expanded=False):
+            st.markdown(f"**Formula used:** `{grounded_formula}`")
+            if grounded_formula_inputs:
+                formula_rows = []
+                for item in grounded_formula_inputs:
+                    evidence = item.get("evidence") or "—"
+                    if len(evidence) > 120:
+                        evidence = evidence[:120] + "…"
+                    formula_rows.append({
+                        "Component": item.get("component", "—"),
+                        "Metric": item.get("metric", "—"),
+                        "Raw value": item.get("raw_value", "—"),
+                        "Derived score": item.get("derived_score", "—"),
+                        "Weight": item.get("weight", "—"),
+                        "Source": item.get("source_name", "—") or "—",
+                        "Evidence": evidence,
+                        "Link": item.get("evidence_url") or "",
+                    })
+
+                st.dataframe(
+                    pd.DataFrame(formula_rows),
+                    use_container_width=True,
+                    hide_index=True,
+                    column_config={
+                        "Evidence": st.column_config.TextColumn(width="large"),
+                        "Link": st.column_config.LinkColumn(width="small", display_text="open ↗"),
+                    },
+                )
 
     if not mts.metric_scores:
         st.caption("No metrics recorded yet for this dimension.")
@@ -990,6 +1031,7 @@ def render_scorecard_tab(company_id: str):
             company_id,
             st.session_state.user_id,
             company_version(company_id),
+            SCORECARD_CACHE_SCHEMA_VERSION,
         )
     except Exception as e:
         st.error(f"Could not compute scorecard: {e}")
