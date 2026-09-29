@@ -86,7 +86,7 @@ def _is_linkedin_person_url(url: str) -> bool:
 
 
 def _domain_root(url: Optional[str]) -> Optional[str]:
-    """Extract the registrable domain (novapay from https://novapay.io/team)."""
+    """Extract the registrable domain (fintech-a from https://fintech-a.example/team)."""
     if not url:
         return None
     try:
@@ -107,7 +107,7 @@ def _snippet_mentions_company(
 
     We accept either:
       - company name appears (case-insensitive, word-boundary tolerant)
-      - company domain root appears (e.g. "novapay" for novapay.io)
+      - company domain root appears (e.g. "fintech-a" for fintech-a.example)
     This dual check catches founders who list the brand in their headline
     but also founders who only link out via the website.
     """

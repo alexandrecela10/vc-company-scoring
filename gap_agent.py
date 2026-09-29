@@ -36,7 +36,7 @@ _FOUNDER_METHODS = {"Ask Founders"}
 # Type A — Founder outreach (drafts an email)
 # =============================================================================
 
-_OUTREACH_PROMPT = """You are a Jasoor Ventures analyst drafting a concise
+_OUTREACH_PROMPT = """You are a venture capital analyst drafting a concise
 email to a startup founder to request ONE missing data point we need to
 complete our investment evaluation.
 
@@ -49,7 +49,7 @@ Rules:
 - Warm but professional tone. Maximum 6 short sentences.
 - Open with one line acknowledging their company (no generic flattery).
 - Be specific about what number/data we need and why it matters to us.
-- Close with a clear ask and a friendly sign-off from "The Jasoor team".
+- Close with a clear ask and a friendly sign-off from "The investment team".
 - Do NOT invent any facts about the company. Do NOT include placeholders
   like [FOUNDER NAME] — use "Hi there," if you don't know the name.
 - Return the email body ONLY. No subject line, no JSON, no markdown.

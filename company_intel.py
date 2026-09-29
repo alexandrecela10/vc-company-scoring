@@ -167,7 +167,7 @@ def build_share_summary(
     Intentionally plain markdown — Slack renders it, and it's email-safe.
     """
     lines = []
-    lines.append(f"# {company['name']} — Jasoor scorecard brief")
+    lines.append(f"# {company['name']} — scorecard brief")
     lines.append("")
     # Headline number
     if scorecard.overall_score is not None:

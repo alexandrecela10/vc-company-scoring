@@ -72,7 +72,7 @@ def find_stale_market_values(days: int = STALENESS_DAYS) -> List[Dict]:
     Return a list of company_metric_value rows for Market Growth metrics
     that are older than `days` and NOT overridden by an analyst.
 
-    This is what the demo surfaces as "stale market signal" on GreenGrid.
+    This is what the demo surfaces as "stale market signal" on Climate C.
     """
     cutoff = datetime.now(timezone.utc) - timedelta(days=days)
     rows = db._fetchall("""

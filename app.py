@@ -84,7 +84,7 @@ SCORECARD_CACHE_SCHEMA_VERSION = 2
 # Page config
 # ---------------------------------------------------------------------------
 st.set_page_config(
-    page_title="Company Scorer — Jasoor Ventures",
+    page_title="Deck Rank",
     page_icon="🏆",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -264,7 +264,7 @@ def render_sidebar():
     """Render the company list sidebar with score badges."""
     with st.sidebar:
         st.markdown("## 🏆 Company Scorer")
-        st.markdown("*Jasoor Ventures — Deal Sourcing*")
+        st.markdown("*Inbound deal sourcing prototype*")
         st.divider()
 
         # --- Global workflows (not tied to any company) --------------------

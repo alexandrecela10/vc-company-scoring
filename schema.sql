@@ -184,7 +184,7 @@ ALTER TABLE company
     ADD COLUMN IF NOT EXISTS discovered_at              TIMESTAMPTZ;
 
 -- Dedup index for discovery re-runs.
--- Uses a normalized lowercase name so "NovaPay" and "novapay" don't collide.
+-- Uses a normalized lowercase name so "Fintech A" and "fintech-a" don't collide.
 -- Partial index (WHERE name IS NOT NULL) keeps it small and safe on NULLs.
 CREATE UNIQUE INDEX IF NOT EXISTS uq_company_name_lower
     ON company (LOWER(name))

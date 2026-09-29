@@ -24,14 +24,14 @@ from pipeline.preprocessors.base import Chunk
 # --- Synthetic DB ---------------------------------------------------------
 # Three companies covering the common edge cases:
 #   TABBY:   short name, has a legal-name alias + matching domain.
-#   NOVAPAY: similar-ish name to "Nova Capital" -> fuzzy collision risk.
+#   FINTECH A: domain alias only, mentioned without its domain.
 #   RIZE:    multiple word name stripped of "Technologies".
 
 COMPANIES = [
     {"id": "11111111-1111-1111-1111-111111111111",
      "name": "Tabby", "website": "https://tabby.ai"},
     {"id": "22222222-2222-2222-2222-222222222222",
-     "name": "NovaPay", "website": "https://novapay.io"},
+     "name": "Fintech A", "website": "https://fintech-a.example"},
     {"id": "33333333-3333-3333-3333-333333333333",
      "name": "Rize Technologies", "website": "https://rize.sa"},
 ]
@@ -42,9 +42,9 @@ ALIASES = [
      "alias": "Tabby Technologies Ltd", "alias_type": "legal_name"},
     {"id": "a2", "company_id": COMPANIES[0]["id"],
      "alias": "tabby.com", "alias_type": "domain"},
-    # NovaPay: domain
+    # Fintech A: domain
     {"id": "a3", "company_id": COMPANIES[1]["id"],
-     "alias": "novapay.io", "alias_type": "domain"},
+     "alias": "fintech-a.example", "alias_type": "domain"},
     # Rize: domain
     {"id": "a4", "company_id": COMPANIES[2]["id"],
      "alias": "rize.sa", "alias_type": "domain"},
@@ -201,11 +201,11 @@ class EntityResolverTests(unittest.TestCase):
         r = make_resolver()
         out = r.resolve(
             "deck.pdf",
-            [chunk("Tabby and NovaPay partnership announcement. tabby.ai", ordinal=0)],
+            [chunk("Tabby and Fintech A partnership announcement. tabby.ai", ordinal=0)],
             min_score=0.0,
         )
         self.assertGreater(len(out), 1)
-        # Tabby has name+domain signals; NovaPay only has a mention.
+        # Tabby has name+domain signals; Fintech A only has a mention.
         self.assertEqual(out[0].company_name, "Tabby")
         scores = [c.score for c in out]
         self.assertEqual(scores, sorted(scores, reverse=True))

@@ -18,7 +18,7 @@ RESTART IDENTITY CASCADE;
 
 -- ============================================================
 -- DEMO BACKDATE (run AFTER seed.sql)
--- Make GreenGrid's "Is in Growing Region" row stale so the
+-- Make Climate C's "Is in Growing Region" row stale so the
 -- market agent has something to refresh during the demo.
 -- ============================================================
 -- UPDATE company_metric_value

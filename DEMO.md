@@ -10,9 +10,9 @@ A deal-sourcing cockpit for a VC analyst. Every company gets a **single 0–5 sc
 
 | Company | State | Story |
 |---|---|---|
-| **NovaPay** | All metrics filled | Happy-path: fully scored with live news + founders |
-| **HealthStack** | 3 must-haves missing | Triggers the **Gap Agent** — drafts founder emails, runs web searches |
-| **GreenGrid** | Stale market data | Triggers the **Market Signal Agent** — refreshes a value >180 days old |
+| **Fintech A** | All metrics filled | Happy-path: fully scored with live news + founders |
+| **Healthtech B** | 3 must-haves missing | Triggers the **Gap Agent** — drafts founder emails, runs web searches |
+| **Climate C** | Stale market data | Triggers the **Market Signal Agent** — refreshes a value >180 days old |
 
 ## Before the demo
 
@@ -21,7 +21,7 @@ A deal-sourcing cockpit for a VC analyst. Every company gets a **single 0–5 sc
 venv/bin/streamlit run app.py --server.port 8502
 ```
 
-If the Market Signal Agent has already been run and GreenGrid is no longer stale, reset it:
+If the Market Signal Agent has already been run and Climate C is no longer stale, reset it:
 
 ```bash
 venv/bin/python3 - <<'PY'
@@ -30,7 +30,7 @@ GG, METRIC = "44444444-0000-0000-0000-000000000003", "33333333-0000-0000-0000-00
 db._execute("UPDATE company_metric_value SET is_latest=FALSE WHERE company_id=%s AND metric_id=%s", (GG, METRIC))
 oldest = db._fetchone("SELECT id FROM company_metric_value WHERE company_id=%s AND metric_id=%s ORDER BY captured_at ASC LIMIT 1", (GG, METRIC))
 db._execute("UPDATE company_metric_value SET is_latest=TRUE, value='false', captured_at=NOW() - INTERVAL '210 days' WHERE id=%s", (oldest["id"],))
-print("GreenGrid is stale again.")
+print("Climate C is stale again.")
 PY
 ```
 
@@ -44,9 +44,9 @@ Open http://localhost:8502. The sidebar shows all 3 companies with:
 - **⚠️ Incomplete** if any must-have is missing
 - **⏳ Stale** if any market signal is >180 days old
 
-> *Click GreenGrid — notice the ⏳ badge immediately tells you something is off.*
+> *Click Climate C — notice the ⏳ badge immediately tells you something is off.*
 
-### 2. GreenGrid — Market Signal Agent — 60s
+### 2. Climate C — Market Signal Agent — 60s
 
 In the scorecard you'll see a **📈 Market Signal Agent** panel listing the stale metric. Click **"🔄 Refresh stale signals now"**:
 
@@ -57,9 +57,9 @@ In the scorecard you'll see a **📈 Market Signal Agent** panel listing the sta
 
 > *Key message: the AI cannot hallucinate sources — we check every link.*
 
-### 3. HealthStack — Gap Agent — 90s
+### 3. Healthtech B — Gap Agent — 90s
 
-Select HealthStack. The **🤖 Gap Agent** panel shows 3 missing must-haves and how each will be handled:
+Select Healthtech B. The **🤖 Gap Agent** panel shows 3 missing must-haves and how each will be handled:
 
 - `Ask Founders` → drafts a founder email via Gemini
 - `LinkedIn` / `Tavily` → runs a targeted web search
@@ -85,7 +85,7 @@ Below the score header, every company shows:
   - **🚫 Pass** — marks the deal passed
   - **📤 Share with team** — generates a copyable markdown brief (score + evidence + links)
 
-### 5. Analyst override (NovaPay or GreenGrid) — 60s
+### 5. Analyst override (Fintech A or Climate C) — 60s
 
 Expand **✏️ Override a metric value (analyst lock)**. Pick any metric, type a new value + reason, save.
 

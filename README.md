@@ -31,7 +31,7 @@ A company-intelligence platform that:
 
 ### Business impact (user stories)
 
-Sourced from the [`docs/jasoor_user_stories.pdf`](./docs/jasoor_user_stories.pdf):
+Sourced from the [`docs/deck_rank_user_stories.pdf`](./docs/deck_rank_user_stories.pdf):
 
 | Persona | Advantage | Business outcome |
 |---|---|---|
@@ -48,8 +48,8 @@ Sourced from the [`docs/jasoor_user_stories.pdf`](./docs/jasoor_user_stories.pdf
 
 ### Demo materials
 
-- **Product walkthrough deck:** [`docs/jasoor_company_intelligence_demo.pdf`](./docs/jasoor_company_intelligence_demo.pdf)
-- **User stories one-pager:** [`docs/jasoor_user_stories.pdf`](./docs/jasoor_user_stories.pdf)
+- **Product walkthrough deck:** [`docs/deck_rank_walkthrough.pdf`](./docs/deck_rank_walkthrough.pdf)
+- **User stories one-pager:** [`docs/deck_rank_user_stories.pdf`](./docs/deck_rank_user_stories.pdf)
 - **5-minute live demo script:** [`DEMO.md`](./DEMO.md)
 
 ### North star
@@ -222,8 +222,8 @@ company_scorer/
 ├── seed.sql                       # Demo data
 ├── tests/                         # unittest suite (65+ tests)
 ├── docs/
-│   ├── jasoor_company_intelligence_demo.pdf  # Product walkthrough
-│   └── jasoor_user_stories.pdf               # Persona advantages + outcomes
+│   ├── deck_rank_walkthrough.pdf  # Product walkthrough
+│   └── deck_rank_user_stories.pdf               # Persona advantages + outcomes
 ├── DEMO.md                        # 5-min demo script
 ├── ARCHITECTURE.md                # Deeper design rationale
 ├── SOVEREIGN_DEPLOYMENT.md        # Sovereignty deployment blueprint
@@ -317,4 +317,4 @@ python3 -m unittest discover tests -v
 
 ## License & confidentiality
 
-Confidential prototype. © Alexandre Cela, 2026. All rights reserved.
+© Alexandre Cela, 2026. All rights reserved.

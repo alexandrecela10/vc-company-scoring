@@ -4,15 +4,15 @@
 -- ============================================================
 -- Creates 3 demo companies designed to show all 3 key demo moments:
 --
---   Company A — "NovaPay"
+--   Company A — "Fintech A"
 --     All must-have metrics filled, high score (~4.1/5)
 --     Demonstrates: healthy scorecard with full evidence trail
 --
---   Company B — "HealthStack"
+--   Company B — "Healthtech B"
 --     Missing "Founders Strength" (must-have) → overall score = NULL
 --     Demonstrates: incomplete scorecard + gap agent trigger
 --
---   Company C — "GreenGrid"
+--   Company C — "Climate C"
 --     All metrics filled BUT market signal is stale/low
 --     Demonstrates: score drops when market agent refreshes signal
 -- ============================================================
@@ -127,23 +127,23 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================
 INSERT INTO company (id, name, website, country, industry, pipeline_stage, source_type, source_channel, notes) VALUES
     ('44444444-0000-0000-0000-000000000001',
-        'NovaPay', 'https://novapay.io', 'UAE', 'Fintech',
+        'Fintech A', 'https://fintech-a.example', 'UAE', 'Fintech',
         'due_diligence', 'inbound', 'Email',
         'B2B payments infrastructure for MENA SMEs. Strong team, Series A. All metrics filled.'),
     ('44444444-0000-0000-0000-000000000002',
-        'HealthStack', 'https://healthstack.ai', 'Egypt', 'HealthTech',
+        'Healthtech B', 'https://healthtech-b.example', 'Egypt', 'HealthTech',
         'deal_sourcing', 'inbound', 'Dropbox',
         'AI-powered clinical decision support. Founders Strength data missing — gap agent demo.'),
     ('44444444-0000-0000-0000-000000000003',
-        'GreenGrid', 'https://greengrid.io', 'Saudi Arabia', 'CleanTech',
+        'Climate C', 'https://climate-c.example', 'Saudi Arabia', 'CleanTech',
         'first_contact', 'outbound', 'LinkedIn',
         'Grid-scale battery storage. Market signal is stale — market agent refresh demo.')
 ON CONFLICT (id) DO NOTHING;
 
 -- Company LinkedIn URLs (added after initial insert so existing DBs get updated)
-UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/novapay-mena'     WHERE id = '44444444-0000-0000-0000-000000000001';
-UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/healthstack-ai'   WHERE id = '44444444-0000-0000-0000-000000000002';
-UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/greengrid-energy' WHERE id = '44444444-0000-0000-0000-000000000003';
+UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/fintech-a'     WHERE id = '44444444-0000-0000-0000-000000000001';
+UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/healthtech-b'   WHERE id = '44444444-0000-0000-0000-000000000002';
+UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/climate-c' WHERE id = '44444444-0000-0000-0000-000000000003';
 
 
 -- ============================================================
@@ -152,23 +152,23 @@ UPDATE company SET linkedin_url = 'https://www.linkedin.com/company/greengrid-en
 -- deck parsing or manual entry.
 -- ============================================================
 INSERT INTO founder (company_id, name, title, linkedin_url) VALUES
-    -- NovaPay
+    -- Fintech A
     ('44444444-0000-0000-0000-000000000001', 'Ahmed Al-Rashid', 'CEO & Co-founder',
-     'https://www.linkedin.com/in/ahmed-al-rashid-novapay'),
+     'https://www.linkedin.com/in/ahmed-al-rashid-fintech-a'),
     ('44444444-0000-0000-0000-000000000001', 'Sara Khoury',     'CTO & Co-founder',
-     'https://www.linkedin.com/in/sara-khoury-novapay'),
+     'https://www.linkedin.com/in/sara-khoury-fintech-a'),
 
-    -- HealthStack
+    -- Healthtech B
     ('44444444-0000-0000-0000-000000000002', 'Dr. Mona El-Sayed', 'CEO & Co-founder',
-     'https://www.linkedin.com/in/mona-elsayed-healthstack'),
+     'https://www.linkedin.com/in/mona-elsayed-healthtech-b'),
     ('44444444-0000-0000-0000-000000000002', 'Youssef Hassan',    'CTO & Co-founder',
-     'https://www.linkedin.com/in/youssef-hassan-healthstack'),
+     'https://www.linkedin.com/in/youssef-hassan-healthtech-b'),
 
-    -- GreenGrid
+    -- Climate C
     ('44444444-0000-0000-0000-000000000003', 'Fahad Al-Saud',   'CEO & Co-founder',
-     'https://www.linkedin.com/in/fahad-alsaud-greengrid'),
+     'https://www.linkedin.com/in/fahad-alsaud-climate-c'),
     ('44444444-0000-0000-0000-000000000003', 'Layla Al-Harbi',  'COO & Co-founder',
-     'https://www.linkedin.com/in/layla-alharbi-greengrid')
+     'https://www.linkedin.com/in/layla-alharbi-climate-c')
 ON CONFLICT DO NOTHING;
 
 
@@ -193,7 +193,7 @@ ON CONFLICT (user_id, metric_type_id) DO NOTHING;
 -- ============================================================
 
 -- ----------------------------------------------------------
--- COMPANY A: NovaPay — all must-haves filled, strong scores
+-- COMPANY A: Fintech A — all must-haves filled, strong scores
 -- ----------------------------------------------------------
 
 -- Founders Strength
@@ -246,7 +246,7 @@ INSERT INTO company_metric_value (company_id, metric_id, value, source_id, raw_e
         'analyst_alex', 0.85, TRUE),
     ('44444444-0000-0000-0000-000000000001', '33333333-0000-0000-0000-000000000011',
         '4', '11111111-0000-0000-0000-000000000004',
-        'Pitchdeck slide 12: NovaPay is the only provider with native Arabic-language reconciliation and VAT-compliant reporting built in.',
+        'Pitchdeck slide 12: Fintech A is the only provider with native Arabic-language reconciliation and VAT-compliant reporting built in.',
         'analyst_alex', 0.87, TRUE),
 
 -- Unit Economics
@@ -285,7 +285,7 @@ INSERT INTO company_metric_value (company_id, metric_id, value, source_id, raw_e
 
 
 -- ----------------------------------------------------------
--- COMPANY B: HealthStack — Founders Strength MISSING (gap demo)
+-- COMPANY B: Healthtech B — Founders Strength MISSING (gap demo)
 -- Must-have metric type has no value → overall_score = NULL
 -- ----------------------------------------------------------
 
@@ -340,12 +340,12 @@ INSERT INTO company_metric_value (company_id, metric_id, value, source_id, raw_e
         'Crunchbase: Founded 2023, Cairo, Egypt.',
         'analyst_alex', 0.99, TRUE);
 
--- NOTE: Founders Strength metrics are intentionally NOT inserted for HealthStack.
+-- NOTE: Founders Strength metrics are intentionally NOT inserted for Healthtech B.
 -- This causes overall_score = NULL and triggers the gap agent demo.
 
 
 -- ----------------------------------------------------------
--- COMPANY C: GreenGrid — market signal is stale/low (market agent demo)
+-- COMPANY C: Climate C — market signal is stale/low (market agent demo)
 -- All metrics filled, but "Is in Growing Region" = false (Saudi CleanTech VC slow)
 -- Running market_agent will refresh this and update the score
 -- ----------------------------------------------------------
@@ -428,7 +428,7 @@ INSERT INTO company_metric_value (company_id, metric_id, value, source_id, raw_e
 
 
 -- ============================================================
--- PIPELINE EVENTS  (stage history for NovaPay and GreenGrid)
+-- PIPELINE EVENTS  (stage history for Fintech A and Climate C)
 -- ============================================================
 INSERT INTO pipeline_event (company_id, from_stage, to_stage, changed_by, triggered_by, score_snapshot) VALUES
     ('44444444-0000-0000-0000-000000000001', 'deal_sourcing', 'first_contact',  'analyst_alex', 'manual',          3.8),

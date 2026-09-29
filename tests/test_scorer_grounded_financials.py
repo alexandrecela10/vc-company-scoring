@@ -24,7 +24,7 @@ def _row(metric_id: str, name: str, code: str, value: str, value_type: str = "nu
             "obtain_method": "derived",
             "metric_type_id": "mt-fin",
         },
-        "data_source": {"name": "NovaPay Deck"},
+        "data_source": {"name": "Fintech A Deck"},
     }
 
 
