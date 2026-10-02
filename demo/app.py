@@ -53,15 +53,16 @@ st.session_state.setdefault("llm_decks", 0)
 
 # --- Top: problem, player, how to try -------------------------------------
 st.title("Deck Rank")
-st.caption("Inbound pitch decks in, ranked queue out. Every value cites its slide.")
+st.caption("Founders email pitch decks (slides asking for money) to a startup fund. This ranks them so the best one is read first.")
 st.markdown(
-    "**Problem.** The best inbound deals wait too long for a first call, and faster funds reach "
-    "the founder first.  \n**For.** Investment analysts at early-stage VC funds.  \n"
-    "**Try it.** 1. Upload a deck (PDF). 2. See where it ranks. 3. Open it to check each value against its slide."
+    "**Problem.** A fund gets many decks a week and reads them in the order they arrive. The best one can wait "
+    "days, and a faster fund meets the founder first.  \n**For.** Junior investors at startup funds.  \n"
+    "**Try it.** 1. Upload a deck (PDF), or use the 3 made-up samples. 2. See where it ranks. "
+    "3. Open it and check each number against the slide it came from."
 )
 st.info(
-    "Use a sample or a public deck. Files stay in memory for this session and are not stored. "
-    "With AI on, deck text is sent to Google Gemini's free tier, which may use it to improve its models."
+    "Use a sample or a public deck. Files stay in this browser session only and are never saved. "
+    "If you turn AI on, the deck text goes to Google's free AI service, which may use it to improve its models."
 )
 
 # --- Upload ----------------------------------------------------------------
@@ -71,13 +72,13 @@ with col_up:
 with col_opts:
     left = SESSION_LLM_DECKS - st.session_state.llm_decks
     can_llm = llm_available and left > 0 and budget.remaining() > 0
-    use_llm = st.toggle("Use AI for metrics the rules miss", value=False, disabled=not can_llm)
+    use_llm = st.toggle("Use AI for numbers the fixed rules miss", value=False, disabled=not can_llm)
     if not llm_available:
-        st.caption("AI is off in this deployment. Rules only.")
+        st.caption("AI is off here. Fixed rules only, free.")
     else:
-        st.caption(f"AI decks left this session: {max(left, 0)}. Shared AI calls left today: {budget.remaining()}.")
+        st.caption(f"AI decks you have left: {max(left, 0)}. AI requests left today for everyone: {budget.remaining()}.")
 
-if up is not None and st.button("Analyse deck", type="primary"):
+if up is not None and st.button("Read and rank this deck", type="primary"):
     raw = up.getvalue()
     problem = check_upload(raw)
     if problem:
@@ -93,7 +94,7 @@ if up is not None and st.button("Analyse deck", type="primary"):
             st.session_state.llm_decks += 1
             result.used_llm = provider.calls > 0
         if result.error:
-            st.error(f"Could not read this deck: {result.error}. Image-only PDFs have no text to extract.")
+            st.error(f"Could not read this deck: {result.error}. Decks saved as images have no text to read.")
         else:
             st.session_state.uploads.append(result)
 
@@ -101,62 +102,62 @@ if up is not None and st.button("Analyse deck", type="primary"):
 decks = rank(sample_results() + st.session_state.uploads)
 yours = {id(d) for d in st.session_state.uploads}
 
-st.subheader("Ranked queue")
+st.subheader("Ranked list: read from the top")
 st.caption(
-    "Ranked on the Financials score, the one must-have category a deck can support. "
-    "The overall score also needs Technology Moat, Market Growth, Competitive Landscape and Unit Economics, "
-    "which an analyst or an agent fills after the deck."
+    "Ranked on the money score (margin, months of cash left, revenue against spending, funding round), "
+    "the one must-have score a deck alone can support. A full score also needs technology, market, "
+    "competition and customer economics, which the investor fills in after reading."
 )
 st.dataframe(pd.DataFrame([{
     "Rank": i + 1,
     "Company": d.name + ("  (yours)" if id(d) in yours else "  (sample)"),
-    "Financials score (1-5)": d.rank_score,
-    "Values found": len(d.values),
-    "Deck metrics missing": len(d.missing_metrics),
+    "Money score (1-5)": d.rank_score,
+    "Numbers found": len(d.values),
+    "Numbers missing": len(d.missing_metrics),
     "AI used": "yes" if d.used_llm else "no",
 } for i, d in enumerate(decks)]), hide_index=True, width="stretch")
 
 # --- One deck in detail ------------------------------------------------------
-st.subheader("Check a deck")
+st.subheader("Check one deck")
 names = [d.name for d in decks]
 pick = st.selectbox("Deck", names, index=len(names) - 1 if st.session_state.uploads else 0)
 d = decks[names.index(pick)]
 
-tab_score, tab_values, tab_gaps = st.tabs(["Why this rank", "Every value and its quote", "Gaps"])
+tab_score, tab_values, tab_gaps = st.tabs(["Why this rank", "Every number and its slide", "What's missing"])
 
 with tab_score:
     if d.financials and d.financials.grounded_formula_inputs:
-        st.markdown(f"**Financials: {d.rank_score} / 5.** Weighted average of the inputs the deck supports.")
+        st.markdown(f"**Money score: {d.rank_score} / 5.** A weighted average of the inputs the deck gives.")
         st.code(d.financials.grounded_formula, language=None)
         st.dataframe(pd.DataFrame([{
-            "Component": i["component"].replace("_", " "),
-            "Raw value": i["raw_value"],
+            "Input": i["component"].replace("_", " "),
+            "Value in deck": i["raw_value"],
             "Score (1-5)": i["derived_score"],
             "Weight": i["weight"],
             "Source": i["source_name"],
             "Quote": i["evidence"],
         } for i in d.financials.grounded_formula_inputs]), hide_index=True, width="stretch")
     else:
-        st.warning("No Financials inputs found in this deck, so it ranks last.")
+        st.warning("No money numbers found in this deck, so it ranks last.")
 
 with tab_values:
-    st.caption("Rules run first. AI values are kept only if their quote appears word for word on the slide.")
+    st.caption("Fixed rules read the deck first. An AI value is kept only if its quote appears word for word on the slide.")
     st.dataframe(pd.DataFrame([{
-        "Metric": METRICS[o.metric_name][0],
+        "Number": METRICS[o.metric_name][0],
         "Value": o.value,
         "As of": o.as_of_date or "",
         "Slide": o.chunk_locator.replace("slide_", ""),
         "Quote": o.evidence_text,
-        "Method": "AI" if o.method == "llm" else "rules",
+        "Read by": "AI" if o.method == "llm" else "fixed rules",
     } for o in d.values]), hide_index=True, width="stretch")
 
 with tab_gaps:
     if d.missing_metrics:
-        st.markdown("**Not found in the deck:** " + ", ".join(METRICS[m][0] for m in d.missing_metrics if m in METRICS))
-        st.text_area("Drafted request to the founder (not sent)", draft_ask(d.name, d.missing_metrics), height=220)
+        st.markdown("**Missing from the deck:** " + ", ".join(METRICS[m][0] for m in d.missing_metrics if m in METRICS))
+        st.text_area("Draft email asking the founder (never sent)", draft_ask(d.name, d.missing_metrics), height=220)
     else:
-        st.success("Every deck metric was found.")
-    st.markdown("**Must-have categories with no score yet:** " + ", ".join(d.missing_must_have_types))
+        st.success("Every number was found.")
+    st.markdown("**Must-have scores still empty (filled after the deck):** " + ", ".join(d.missing_must_have_types))
 
 st.divider()
-st.caption(f"[Case study]({CASE_STUDY}) · [Code]({REPO}) · Sample decks are fictional.")
+st.caption(f"[Case study]({CASE_STUDY}) · [Code]({REPO}) · Sample decks are made up.")
