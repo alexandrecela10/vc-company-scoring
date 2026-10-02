@@ -20,8 +20,9 @@ from tracing import create_generation, create_trace, get_langfuse
 logger = logging.getLogger(__name__)
 
 # --- Config ---
-MODEL_FLASH = "gemini-2.5-flash"      # Fast model for search, extraction, summary
-MODEL_PRO = "gemini-2.5-pro"          # Powerful model for scoring (Step 3)
+# gemini-2.5-* is closed to new API keys (404 "no longer available to new users", 2026-10-02).
+MODEL_FLASH = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")            # search, extraction, summary
+MODEL_PRO = os.environ.get("GEMINI_MODEL_STRONG", "gemini-3.1-pro-preview")  # scoring (Step 3)
 MODEL_ID = MODEL_FLASH                 # Default model
 CALL_DELAY_SECONDS = 1.5
 MAX_RETRIES = 3

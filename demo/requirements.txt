@@ -1,0 +1,11 @@
+# Deck Rank public demo. Streamlit Community Cloud reads this file because
+# it sits next to the entrypoint (demo/app.py).
+streamlit>=1.30.0
+pandas>=2.0.0
+pdfplumber>=0.11.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+psycopg2-binary>=2.9     # imported by db.py at load time; the demo never connects
+google-genai>=1.0.0      # only used when the AI toggle is on
+langfuse>=2.0.0,<3.0.0   # imported by llm_client; tracing stays off without keys
+rapidfuzz>=3.0.0

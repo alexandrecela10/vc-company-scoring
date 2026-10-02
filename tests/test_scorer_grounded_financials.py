@@ -74,3 +74,33 @@ class GroundedFinancialsScoringTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BurnAnnualisationTests(unittest.TestCase):
+    """Bug fix 2026-10-01: annual revenue was divided by monthly burn, so burn efficiency was always 5."""
+
+    def _burn_score(self, burn_granularity):
+        rev = _row("m-rev", "Revenue", "revenue", "1800000")
+        burn = _row("m-burn", "Burn Rate", "burn_rate", "150000")
+        burn["period_granularity"] = burn_granularity
+        mts = _score_metric_type({"id": "mt-fin", "name": "Financials"}, [rev, burn])
+        return next(i for i in mts.grounded_formula_inputs if i["component"] == "burn_efficiency_score")["derived_score"]
+
+    def test_monthly_burn_is_annualised(self):
+        # 1.8M revenue vs 150K x 12 = 1.8M burn -> 1 + 2 x 1.0 = 3.0
+        self.assertEqual(self._burn_score("month"), 3.0)
+
+    def test_annual_or_unknown_burn_used_as_is(self):
+        # 1.8M / 150K = 12 -> clamped to 5 (unchanged behaviour for rows without granularity)
+        self.assertEqual(self._burn_score("year"), 5.0)
+        self.assertEqual(self._burn_score(None), 5.0)
+
+
+class YearColumnGranularityTests(unittest.TestCase):
+    def test_year_label_marks_value_annual(self):
+        from pipeline.extractors.temporal import granularity_for_label
+        self.assertEqual(granularity_for_label("month", "2025"), "year")
+        self.assertEqual(granularity_for_label("month", "2026E"), "year")
+        self.assertEqual(granularity_for_label("month", "FY2024"), "year")
+        self.assertEqual(granularity_for_label("month", "Q3 2025"), "month")
+        self.assertEqual(granularity_for_label("month", None), "month")

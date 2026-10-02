@@ -340,8 +340,9 @@ revenue:
       patterns:
         # "$1.8M revenue", "$300k in revenue"
         - '\$\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\s*(?:in\s+)?revenue\b'
-        # "revenue of $1.8M", "revenue: 1.8M"
-        - '\brevenue[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\b'
+        # "revenue of $1.8M", "revenue: 1.8M", "revenue 2025: $1.8M"
+        # The optional year label is skipped so "2025" is never read as the amount.
+        - '\brevenue(?:\s+(?:fy)?(?:19|20)\d{2})?[:\s]+\$?\s*(?P<amount>[\d.,]+)\s*(?P<unit>k|m|mm|b|million|billion)?\b'
       normalise:
         kind: number_with_unit
         unit_group: unit

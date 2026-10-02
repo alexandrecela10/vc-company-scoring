@@ -61,6 +61,7 @@ class MetricScore:
     override_reason: Optional[str]
     captured_by: str
     captured_at: str
+    period_granularity: Optional[str] = None  # "month" | "year" | ...; None when the source row lacks it
 
 
 @dataclass
@@ -152,7 +153,8 @@ def _grounded_financials_formula(metric_scores: List[MetricScore]) -> Tuple[Opti
     Formula (when inputs are available):
       gross_margin_score = clamp(gross_margin_pct / 20, 1, 5)
       runway_score       = clamp(runway_months / 6, 1, 5)
-      burn_eff_score     = clamp(1 + 2*(revenue / burn_rate), 1, 5)
+      burn_eff_score     = clamp(1 + 2*(revenue / annual_burn), 1, 5)
+                           annual_burn = burn_rate x 12 when the burn is monthly
       stage_score        = funding_stage (already 1-5)
 
       financials_score = weighted_avg(available components)
@@ -198,7 +200,9 @@ def _grounded_financials_formula(metric_scores: List[MetricScore]) -> Tuple[Opti
     revenue_raw = _to_float(revenue.value_raw) if revenue else None
     burn_raw = _to_float(burn.value_raw) if burn else None
     if revenue and burn and revenue_raw is not None and burn_raw is not None and burn_raw > 0:
-        burn_eff = _clamp_score_1_to_5(1.0 + 2.0 * (revenue_raw / burn_raw))
+        # Revenue is annual; burn is often monthly. Compare like with like.
+        annual_burn = burn_raw * 12 if burn.period_granularity == "month" else burn_raw
+        burn_eff = _clamp_score_1_to_5(1.0 + 2.0 * (revenue_raw / annual_burn))
         add_component("burn_efficiency_score", burn_eff, 0.25, revenue, revenue_raw)
 
     stage = by_code.get("funding_stage")
@@ -214,7 +218,7 @@ def _grounded_financials_formula(metric_scores: List[MetricScore]) -> Tuple[Opti
     final_score = round(final_score, 2)
     formula = (
         "FinancialsScore = weighted_avg("
-        "gross_margin/20, runway_months/6, 1+2*(revenue/burn_rate), funding_stage"
+        "gross_margin/20, runway_months/6, 1+2*(revenue/annual_burn), funding_stage"
         ") on available inputs, then clamped to 1-5 per component"
     )
     return final_score, formula, inputs
@@ -268,6 +272,7 @@ def _score_metric_type(
             override_reason=row.get("override_reason"),
             captured_by=row.get("captured_by", ""),
             captured_at=str(row.get("captured_at", "")),
+            period_granularity=row.get("period_granularity"),
         ))
 
     # Identify must-have metrics with no scoreable value

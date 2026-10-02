@@ -164,6 +164,14 @@ def derive_scenario_and_date(
     return scenario, as_of_date
 
 
+def granularity_for_label(default: Optional[str], period_label: Optional[str]) -> Optional[str]:
+    """A value read from a yearly column ("2025", "2026E", "FY2025") is an annual figure,
+    even if the metric's default granularity is monthly (e.g. burn in a P&L table)."""
+    if period_label and _YEAR_LABEL_RE.match(period_label.strip()):
+        return "year"
+    return default
+
+
 def scan_nearby_period_label(
     text: str, start: int, end: int, window: int = 60
 ) -> Optional[str]:

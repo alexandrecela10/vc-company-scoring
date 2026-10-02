@@ -9,7 +9,7 @@ import re
 from typing import Any, Dict, Iterable, List, Optional
 
 from pipeline.extractors.base import Observation
-from pipeline.extractors.temporal import derive_scenario_and_date
+from pipeline.extractors.temporal import derive_scenario_and_date, granularity_for_label
 from pipeline.preprocessors.base import Chunk
 
 _PERIOD_RE = re.compile(
@@ -102,7 +102,7 @@ def _extract_from_table(
                         "unit_hint": units,
                     },
                     as_of_date=as_of_date,
-                    period_granularity=(cfg.get("temporal") or {}).get("period_granularity") or _GRANULARITY.get(metric),
+                    period_granularity=granularity_for_label((cfg.get("temporal") or {}).get("period_granularity") or _GRANULARITY.get(metric), period_label),
                     scenario=scenario,
                     currency="USD" if cfg.get("unit") == "usd" else None,
                     period_label=period_label,

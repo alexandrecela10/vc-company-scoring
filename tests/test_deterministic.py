@@ -112,6 +112,13 @@ class DeterministicEngineTests(unittest.TestCase):
         self.assertEqual(len(fs), 1)
         self.assertEqual(fs[0].value, "1")
 
+    def test_revenue_year_label_not_read_as_amount(self):
+        # Bug fix 2026-09-28: "Revenue 2025: $1.8M" was stored as 2025.
+        obs = self.engine.extract([chunk("Revenue 2025: $1.8M")])
+        rev = [o for o in obs if o.metric_name == "revenue"]
+        self.assertEqual(len(rev), 1)
+        self.assertEqual(rev[0].value, "1800000")
+
     def test_funding_stage_does_not_capture_nearby_year(self):
         # Bug fix 2026-04-23: timeless metrics (requires=[]) must NEVER pick
         # up an opportunistic year from the scan window. A deck saying

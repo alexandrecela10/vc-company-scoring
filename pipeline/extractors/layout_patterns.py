@@ -7,7 +7,7 @@ from datetime import date
 from typing import Any, Dict, Iterable, List, Optional
 
 from pipeline.extractors.base import Observation
-from pipeline.extractors.temporal import derive_scenario_and_date
+from pipeline.extractors.temporal import derive_scenario_and_date, granularity_for_label
 from pipeline.preprocessors.base import Chunk
 
 _MONEY_RE = re.compile(r"\$\s*(?P<amount>[\d.]+)\s*(?P<unit>k|m|b|million|billion)?", re.IGNORECASE)
@@ -288,7 +288,7 @@ def _observation(
         confidence=0.86,
         method_details={"pattern_type": period_label},
         as_of_date=as_of_date,
-        period_granularity=(cfg.get("temporal") or {}).get("period_granularity"),
+        period_granularity=granularity_for_label((cfg.get("temporal") or {}).get("period_granularity"), period_label),
         scenario=scenario,
         currency="USD" if cfg.get("unit") == "usd" else None,
         period_label=period_label,
