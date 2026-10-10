@@ -53,11 +53,11 @@ st.session_state.setdefault("llm_decks", 0)
 
 # --- Top: problem, player, how to try -------------------------------------
 st.title("Deck Rank")
-st.caption("Founders email pitch decks (slides asking for money) to a startup fund. This ranks them so the best one is read first.")
+st.caption("Founders email pitch decks (slides asking for money) to your fund. Deck Rank ranks them so you read the best one first.")
 st.markdown(
-    "**Problem.** A fund gets many decks a week and reads them in the order they arrive. The best one can wait "
-    "days, and a faster fund meets the founder first.  \n**For.** Junior investors at startup funds.  \n"
-    "**Try it.** 1. Upload a deck (PDF), or use the 3 made-up samples. 2. See where it ranks. "
+    "**You.** A junior investor at a startup fund.  \n**Your problem.** Your fund gets many decks a week and you read "
+    "them in the order they arrive. The best one can wait days, and a faster fund meets the founder first.  \n"
+    "**Try it.** 1. Upload your deck (PDF), or use the 3 made-up samples. 2. See where it ranks. "
     "3. Open it and check each number against the slide it came from."
 )
 st.info(
@@ -106,7 +106,7 @@ st.subheader("Ranked list: read from the top")
 st.caption(
     "Ranked on the money score (margin, months of cash left, revenue against spending, funding round), "
     "the one must-have score a deck alone can support. A full score also needs technology, market, "
-    "competition and customer economics, which the investor fills in after reading."
+    "competition and customer economics, which you fill in after reading."
 )
 st.dataframe(pd.DataFrame([{
     "Rank": i + 1,
